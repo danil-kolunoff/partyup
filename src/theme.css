@@ -1,57 +1,72 @@
 :root {
-  --bg: #100821;
-  --bg-deep: #080511;
-  --surface: rgba(255, 255, 255, 0.07);
-  --surface-strong: rgba(255, 255, 255, 0.12);
-  --surface-hot: rgba(255, 92, 138, 0.16);
-  --border: rgba(255, 255, 255, 0.15);
-  --border-strong: rgba(255, 255, 255, 0.28);
-  --text: #fff8ff;
-  --muted: #b8a9d9;
-  --dim: #776a97;
-  --violet: #7c5cff;
-  --purple: #b14bff;
-  --magenta: #ff4fb8;
-  --pink: #ff6d93;
-  --amber: #ffd45a;
-  --orange: #ff8a3d;
-  --cyan: #55dcff;
-  --green: #66f2a4;
-  --red: #ff4f68;
-  --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
-  --glow: 0 0 34px rgba(255, 79, 184, 0.34), 0 0 60px rgba(124, 92, 255, 0.22);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: var(--text);
-  background: var(--bg);
+  /* Telegram theme params — overridden at runtime via JS */
+  --tg-bg: var(--tg-theme-bg-color, #0f0f14);
+  --tg-surface: var(--tg-theme-secondary-bg-color, #1a1a22);
+  --tg-text: var(--tg-theme-text-color, #f2f2f7);
+  --tg-hint: var(--tg-theme-hint-color, rgba(242,242,247,0.45));
+  --tg-link: var(--tg-theme-link-color, #5c73f2);
+  --tg-btn: var(--tg-theme-button-color, #5c73f2);
+  --tg-btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --tg-destructive: var(--tg-theme-destructive-text-color, #ff453a);
+
+  /* App accent (single, blue-violet) */
+  --accent: #5c73f2;
+  --accent-dim: rgba(92,115,242,0.18);
+  --accent-glow: rgba(92,115,242,0.35);
+
+  /* Surfaces */
+  --surface-1: var(--tg-bg);
+  --surface-2: var(--tg-surface);
+  --surface-3: color-mix(in srgb, var(--tg-surface) 80%, white 20%);
+  --border: rgba(255,255,255,0.07);
+  --border-accent: rgba(92,115,242,0.3);
+
+  /* Text */
+  --text: var(--tg-text);
+  --muted: var(--tg-hint);
+
+  /* Radius */
+  --r-sm: 12px;
+  --r-md: 18px;
+  --r-lg: 24px;
+  --r-xl: 32px;
+
+  /* Shadows */
+  --shadow-sm: 0 2px 12px rgba(0,0,0,0.25);
+  --shadow-md: 0 8px 32px rgba(0,0,0,0.35);
+  --shadow-lg: 0 20px 60px rgba(0,0,0,0.5);
+
+  /* Safe areas */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* Motion */
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-out: cubic-bezier(0.16,1,0.3,1);
+  --dur-fast: 160ms;
+  --dur-mid: 240ms;
 }
 
-* {
-  box-sizing: border-box;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at 20% 0%, rgba(255, 79, 184, 0.26), transparent 34%),
-    radial-gradient(circle at 86% 12%, rgba(85, 220, 255, 0.18), transparent 30%),
-    linear-gradient(160deg, #170934 0%, #0f0925 46%, #07040f 100%);
+  background: var(--surface-1);
   color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+  min-height: 100dvh;
 }
 
 button {
-  border: 0;
-  border-radius: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-button:focus-visible,
-a:focus-visible {
-  outline: 3px solid rgba(85, 220, 255, 0.75);
-  outline-offset: 3px;
+  cursor: pointer; border: none; background: none;
+  color: inherit; font: inherit; -webkit-tap-highlight-color: transparent;
 }
