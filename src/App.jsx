@@ -58,8 +58,11 @@ function createRound(game, roundIndex, players) {
 /* ─── Constants ───────────────────────────────────────────────────────────── */
 const SCREENS = {
   HOME: 'home', PICKER: 'picker', DETAIL: 'gameDetail',
+  PLAYER_SETUP: 'playerSetup',
   LOBBY: 'lobby', ROUND: 'round', RESULTS: 'results', SETTINGS: 'settings',
 }
+
+const EMOJIS = ['😎','✨','🕶️','🎧','🌟','🔥','💫','🎯','🎪','🎲']
 
 const GAME_ICONS_MAP = {
   truth: Target, never: ShieldCheck, whoofus: Users, five: Timer,
@@ -115,6 +118,8 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('partyup_welcomed'))
   const [showWarmupHint, setShowWarmupHint] = useState(false)
   const [settings, setSettings] = useState({ mode: 'Один телефон', rounds: 6, privacy: 'По ссылке' })
+  const [playerNames, setPlayerNames] = useState(['Вы', 'Игрок 2', 'Игрок 3'])
+  const [gameMode, setGameMode] = useState('one_phone')
 
   const selectedGame = useMemo(() => GAMES.find(g => g.id === selectedGameId) || GAMES[0], [selectedGameId])
   const recommendations = useMemo(() => recommendGames(picker), [picker])
@@ -156,18 +161,15 @@ export default function App() {
 
   const openGame = useCallback((gameId) => { haptic(); navigate(SCREENS.DETAIL, gameId) }, [haptic, navigate])
 
-  const createLobby = useCallback((mode = 'Один телефон') => {
+  const createLobby = useCallback((names, mode) => {
     if (picker.vibe === 'warmup') setShowWarmupHint(true)
     else setShowWarmupHint(false)
-    const host = createPlayer({ id: 'host', name: 'Вы', emoji: '😎', ready: true, isHost: true })
-    const newRoom = createRoom(host, selectedGame)
-    newRoom.players = [
-      host,
-      createPlayer({ id: 'anya', name: 'Аня', emoji: '✨', ready: true }),
-      createPlayer({ id: 'dima', name: 'Дима', emoji: '🕶️', ready: false }),
-      createPlayer({ id: 'sasha', name: 'Саша', emoji: '🎧', ready: true }),
-    ]
-    newRoom.settings = { ...newRoom.settings, mode, vibe: picker.vibe }
+    const playersList = names.map((name, i) =>
+      createPlayer({ id: `p${i}`, name, emoji: EMOJIS[i % EMOJIS.length], ready: true, isHost: i === 0 })
+    )
+    const newRoom = createRoom(playersList[0], selectedGame)
+    newRoom.players = playersList
+    newRoom.settings = { ...newRoom.settings, mode: mode === 'one_phone' ? 'Один телефон' : mode === 'all_see' ? 'Все видят экран' : 'Мультиплеер', vibe: picker.vibe }
     setRoom(newRoom); setRoundIndex(0); setReaction(null)
     haptic('impact'); navigate(SCREENS.LOBBY)
   }, [haptic, navigate, picker, selectedGame])
@@ -181,6 +183,10 @@ export default function App() {
     if (roundIndex >= selectedGame.samplePrompts.length - 1) { haptic('success'); navigate(SCREENS.RESULTS); return }
     setRoundIndex(i => i + 1); setReaction(null); haptic('impact')
   }, [haptic, navigate, roundIndex, selectedGame])
+
+  const endGame = useCallback(() => {
+    haptic('success'); navigate(SCREENS.RESULTS)
+  }, [haptic, navigate])
 
   const togglePlayerReady = useCallback((playerId) => {
     setRoom(r => r ? ({
@@ -258,7 +264,13 @@ export default function App() {
         {screen === SCREENS.PICKER &&
           <PickerScreen picker={picker} setPicker={setPicker} recommendations={recommendations} onSelect={openGame} />}
         {screen === SCREENS.DETAIL &&
-          <GameDetailScreen game={selectedGame} onPlay={createLobby} />}
+          <GameDetailScreen game={selectedGame} onSetup={() => navigate(SCREENS.PLAYER_SETUP)} />}
+        {screen === SCREENS.PLAYER_SETUP &&
+          <PlayerSetupScreen
+            game={selectedGame}
+            onStart={(names, mode) => { setPlayerNames(names); setGameMode(mode); createLobby(names, mode) }}
+            onBack={goBack}
+          />}
         {screen === SCREENS.LOBBY &&
           <LobbyScreen game={selectedGame} players={players} room={room}
             settings={settings} setSettings={setSettings}
@@ -270,7 +282,8 @@ export default function App() {
         {screen === SCREENS.ROUND &&
           <RoundScreen game={selectedGame} round={currentRound}
             roundIndex={roundIndex} total={selectedGame.samplePrompts.length}
-            reaction={reaction} setReaction={setReaction} onNext={nextRound} haptic={haptic} />}
+            players={players}
+            onNext={nextRound} onEnd={endGame} haptic={haptic} />}
         {screen === SCREENS.RESULTS &&
           <ResultsScreen game={selectedGame} players={players}
             shared={shared} setShared={setShared}
@@ -480,7 +493,7 @@ function RecommendResults({ recommendations, onSelect, onReset }) {
 }
 
 /* ─── GameDetailScreen ───────────────────────────────────────────────────── */
-function GameDetailScreen({ game, onPlay }) {
+function GameDetailScreen({ game, onSetup }) {
   return (
     <div>
       <div className="game-hero">
@@ -518,13 +531,129 @@ function GameDetailScreen({ game, onPlay }) {
       </div>
 
       <div className="play-actions">
-        <button className="btn-primary" onClick={() => onPlay('Один телефон')}>
-          <Play size={17}/> Играть на одном телефоне
-        </button>
-        <button className="btn-secondary" onClick={() => onPlay('Свои устройства')}>
-          <UserPlus size={16}/> Создать лобби
+        <button className="btn-primary" onClick={onSetup}>
+          <Play size={17}/> Играть
         </button>
       </div>
+    </div>
+  )
+}
+
+/* ─── PlayerSetupScreen ──────────────────────────────────────────────────── */
+function PlayerSetupScreen({ game, onStart, onBack }) {
+  const [step, setStep] = useState(0) // 0=mode, 1=names
+  const [mode, setMode] = useState('one_phone')
+  const [names, setNames] = useState(['Вы', 'Игрок 2', 'Игрок 3'])
+
+  const modeOptions = [
+    {
+      id: 'one_phone',
+      icon: <Play size={22} color="var(--accent-2)"/>,
+      label: 'На одном телефоне',
+      desc: 'Передаём телефон по кругу',
+      disabled: false,
+    },
+    {
+      id: 'all_see',
+      icon: <Users size={22} color="var(--accent-2)"/>,
+      label: 'Все видят экран',
+      desc: 'Телефон лежит на столе',
+      disabled: false,
+    },
+    {
+      id: 'multiplayer',
+      icon: <Share2 size={22} color="var(--muted)"/>,
+      label: 'Мультиплеер',
+      desc: 'У каждого свой телефон',
+      disabled: true,
+      badge: 'Скоро',
+    },
+  ]
+
+  const updateName = (i, val) => setNames(n => n.map((name, idx) => idx === i ? val : name))
+  const addPlayer = () => {
+    if (names.length >= 10) return
+    setNames(n => [...n, `Игрок ${n.length + 1}`])
+  }
+  const removePlayer = (i) => {
+    if (names.length <= 2) return
+    setNames(n => n.filter((_, idx) => idx !== i))
+  }
+
+  if (step === 0) {
+    return (
+      <div>
+        <p className="eyebrow"><Sparkles size={13}/> Настройка игры</p>
+        <h2 style={{marginBottom:6}}>Как играем?</h2>
+        <p className="lead" style={{marginBottom:4}}>{game.title}</p>
+
+        <div className="mode-option-grid">
+          {modeOptions.map(opt => (
+            <button
+              key={opt.id}
+              className={`mode-option-btn ${mode === opt.id ? 'is-selected' : ''}`}
+              onClick={() => !opt.disabled && setMode(opt.id)}
+              disabled={opt.disabled}
+            >
+              <div className="mode-option-icon">{opt.icon}</div>
+              <div className="mode-option-text">
+                <div className="mode-option-label">{opt.label}</div>
+                <div className="mode-option-desc">{opt.desc}</div>
+              </div>
+              {opt.badge && <span className="mode-soon-badge">{opt.badge}</span>}
+              {mode === opt.id && !opt.disabled && <Check size={16} color="var(--accent-2)" style={{flexShrink:0}}/>}
+            </button>
+          ))}
+        </div>
+
+        <button className="btn-primary mt-16" onClick={() => setStep(1)}>
+          <ChevronRight size={17}/> Далее
+        </button>
+        <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
+          <ArrowLeft size={15}/> Назад
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <p className="eyebrow"><Users size={13}/> Игроки</p>
+      <h2 style={{marginBottom:6}}>Кто играет?</h2>
+      <p className="lead" style={{marginBottom:4}}>{game.title}</p>
+
+      <div className="setup-player-list">
+        {names.map((name, i) => (
+          <div key={i} className="setup-player-row">
+            <div className="setup-player-emoji">{EMOJIS[i % EMOJIS.length]}</div>
+            <input
+              className="setup-player-input"
+              value={name}
+              onChange={e => updateName(i, e.target.value)}
+              placeholder={`Игрок ${i + 1}`}
+              maxLength={20}
+            />
+            {names.length > 2 && (
+              <button className="setup-player-remove" onClick={() => removePlayer(i)} aria-label="Удалить игрока">
+                <X size={15}/>
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {names.length < 10 && (
+        <button className="setup-add-btn" onClick={addPlayer}>
+          <UserPlus size={16}/> Добавить игрока
+        </button>
+      )}
+
+      <button className="btn-primary mt-16" onClick={() => onStart(names, mode)}>
+        <Play size={17}/> Начать игру
+      </button>
+      <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(0)}>
+        <ArrowLeft size={15}/> Назад
+      </button>
     </div>
   )
 }
@@ -618,10 +747,10 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
   )
 }
 
-/* ─── RoundScreen ────────────────────────────────────────────────────────── */
-function RoundScreen({ game, round, roundIndex, total, reaction, setReaction, onNext, haptic }) {
+/* ─── Shared Round Utilities ─────────────────────────────────────────────── */
+function RoundHeader({ game, roundIndex, total }) {
   return (
-    <div>
+    <>
       <div className="round-header">
         <span className="round-counter"><Timer size={13}/> Раунд {roundIndex+1} из {total}</span>
         <span className="tag tag-accent"><GameIcon gameId={game.id} size={12}/> {game.title}</span>
@@ -629,31 +758,815 @@ function RoundScreen({ game, round, roundIndex, total, reaction, setReaction, on
       <div className="round-progress">
         <div className="round-progress-fill" style={{width:`${((roundIndex+1)/total)*100}%`}}/>
       </div>
+    </>
+  )
+}
 
-      <div className="prompt-card">
-        <div className="prompt-type"><Sparkles size={12}/> {round.promptType}</div>
-        <div className="prompt-text">{round.promptText}</div>
-        <div className="prompt-player">
-          Отвечает: <strong>{round.activePlayerId}</strong>
+function NextRoundBtn({ roundIndex, total, onNext, onEnd }) {
+  const isLast = roundIndex >= total - 1
+  return (
+    <button className="btn-primary no-pulse mt-16" onClick={isLast ? onEnd : onNext}>
+      {isLast ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
+    </button>
+  )
+}
+
+/* ─── RoundScreen dispatcher ─────────────────────────────────────────────── */
+function RoundScreen({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const props = { game, round, roundIndex, total, players, onNext, onEnd, haptic }
+  switch (game.roundType) {
+    case 'truth_dare':   return <TruthOrDareRound {...props} />
+    case 'never_have_i': return <NeverHaveIRound {...props} />
+    case 'who_of_us':    return <WhoOfUsRound {...props} />
+    case 'most_likely':  return <MostLikelyRound {...props} />
+    case 'five_seconds': return <FiveSecondsRound {...props} />
+    case 'spy':          return <SpyRound {...props} />
+    case 'alias':        return <AliasRound {...props} />
+    case 'who_am_i':     return <WhoAmIRound {...props} />
+    case 'fact_guess':   return <FactGuessRound {...props} />
+    case 'meme_battle':  return <MemeBattleRound {...props} />
+    default:             return <GenericRound {...props} />
+  }
+}
+
+/* ─── TruthOrDareRound ───────────────────────────────────────────────────── */
+function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [choice, setChoice] = useState(null) // null | 'truth' | 'dare'
+  const activePlayer = players[roundIndex % players.length]
+
+  const truthPrompts = game.samplePrompts.filter(p => p.type === 'Правда')
+  const darePrompts = game.samplePrompts.filter(p => p.type === 'Действие')
+  const [shownPrompt, setShownPrompt] = useState(null)
+
+  const pick = (type) => {
+    const pool = type === 'truth' ? truthPrompts : darePrompts
+    const p = pool[Math.floor(Math.random() * pool.length)]
+    setShownPrompt(p)
+    setChoice(type)
+    haptic('impact')
+  }
+
+  const handleNext = () => { setChoice(null); setShownPrompt(null); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">выбирает</div>
         </div>
       </div>
 
-      <div className="reactions-row" role="group" aria-label="Реакции">
-        {REACTIONS_LIST.map(r => (
-          <button key={r}
-            className={`reaction-btn ${reaction === r ? 'tapped' : ''}`}
-            onClick={() => { setReaction(r); haptic() }}
-            aria-label={`Реакция ${r}`} aria-pressed={reaction === r}>
-            {r}
+      {!choice ? (
+        <div className="td-choice-grid">
+          <button className="td-choice-btn td-truth" onClick={() => pick('truth')}>
+            <Target size={32}/>
+            <span>Правда</span>
+            <span className="td-choice-hint">Честный ответ</span>
+          </button>
+          <button className="td-choice-btn td-dare" onClick={() => pick('dare')}>
+            <Flame size={32}/>
+            <span>Действие</span>
+            <span className="td-choice-hint">Задание</span>
+          </button>
+        </div>
+      ) : (
+        <div className="prompt-card" style={{textAlign:'center'}}>
+          <div className="prompt-type"><Sparkles size={12}/> {shownPrompt?.type}</div>
+          <div className="prompt-text">{shownPrompt?.text}</div>
+        </div>
+      )}
+
+      {choice && <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>}
+    </div>
+  )
+}
+
+/* ─── NeverHaveIRound ────────────────────────────────────────────────────── */
+function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [confessed, setConfessed] = useState(new Set())
+
+  const toggle = (playerId) => {
+    haptic()
+    setConfessed(s => {
+      const n = new Set(s)
+      n.has(playerId) ? n.delete(playerId) : n.add(playerId)
+      return n
+    })
+  }
+
+  const handleNext = () => { setConfessed(new Set()); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="prompt-card">
+        <div className="prompt-type"><Sparkles size={12}/> Я никогда не…</div>
+        <div className="prompt-text">…{round.promptText}</div>
+        <div className="prompt-player" style={{marginTop:12}}>Поднимите руку, если делали это:</div>
+      </div>
+
+      <div className="never-player-list">
+        {players.map(p => (
+          <button key={p.id} className={`never-player-btn ${confessed.has(p.id) ? 'confessed' : ''}`}
+            onClick={() => toggle(p.id)}>
+            <span className="never-player-emoji">{p.emoji}</span>
+            <span className="never-player-name">{p.name}</span>
+            {confessed.has(p.id) && <Check size={16} className="never-check"/>}
           </button>
         ))}
       </div>
 
-      <button className="btn-primary no-pulse" onClick={onNext}>
-        {roundIndex >= total-1
-          ? <><Trophy size={17}/> Показать итоги</>
-          : <><ChevronRight size={17}/> Следующий раунд</>}
-      </button>
+      {confessed.size > 0 && (
+        <div className="never-confession-bar">
+          🙋 {confessed.size} из {players.length} признались
+        </div>
+      )}
+
+      <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+    </div>
+  )
+}
+
+/* ─── VoteRound (shared for WhoOfUs + MostLikely) ───────────────────────── */
+function VoteRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [votes, setVotes] = useState({})
+  const [phase, setPhase] = useState('voting') // 'voting' | 'result'
+
+  const vote = (targetId) => {
+    haptic()
+    setVotes(v => ({ ...v, _single: targetId }))
+    setPhase('result')
+  }
+
+  const voteCounts = players.reduce((acc, p) => {
+    acc[p.id] = Object.values(votes).filter(v => v === p.id).length
+    return acc
+  }, {})
+  const winner = players.reduce((a, b) => (voteCounts[a.id] || 0) >= (voteCounts[b.id] || 0) ? a : b)
+
+  const handleNext = () => { setVotes({}); setPhase('voting'); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="prompt-card">
+        <div className="prompt-type"><Sparkles size={12}/> {round.promptType}</div>
+        <div className="prompt-text">{round.promptText}</div>
+      </div>
+
+      {phase === 'voting' && (
+        <>
+          <p className="eyebrow" style={{margin:'16px 0 10px'}}><Users size={12}/> Кто это?</p>
+          <div className="vote-player-grid">
+            {players.map(p => (
+              <button key={p.id} className="vote-player-btn" onClick={() => vote(p.id)}>
+                <span className="vote-emoji">{p.emoji}</span>
+                <span className="vote-name">{p.name}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'result' && (
+        <>
+          <div className="vote-result-card">
+            <div className="vote-result-label">Компания решила:</div>
+            <div className="vote-result-winner">
+              <span>{winner.emoji}</span>
+              <strong>{winner.name}</strong>
+            </div>
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+function WhoOfUsRound(props) { return <VoteRound {...props} /> }
+function MostLikelyRound(props) { return <VoteRound {...props} /> }
+
+/* ─── FiveSecondsRound ───────────────────────────────────────────────────── */
+function FiveSecondsRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('ready') // 'ready' | 'countdown' | 'done'
+  const [count, setCount] = useState(5)
+  const activePlayer = players[roundIndex % players.length]
+
+  useEffect(() => {
+    if (phase !== 'countdown') return
+    if (count <= 0) { setPhase('done'); haptic('success'); return }
+    const t = setTimeout(() => setCount(c => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [phase, count, haptic])
+
+  const start = () => { setCount(5); setPhase('countdown'); haptic('impact') }
+  const handleNext = () => { setPhase('ready'); setCount(5); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">отвечает</div>
+        </div>
+      </div>
+
+      <div className="prompt-card">
+        <div className="prompt-type"><Timer size={12}/> 5 секунд</div>
+        <div className="prompt-text">{round.promptText}</div>
+      </div>
+
+      {phase === 'ready' && (
+        <button className="btn-primary mt-16" onClick={start}><Play size={17}/> Поехали!</button>
+      )}
+
+      {phase === 'countdown' && (
+        <div className="five-countdown">
+          <div className={`five-number ${count <= 2 ? 'urgent' : ''}`}>{count}</div>
+          <div className="five-label">секунд</div>
+        </div>
+      )}
+
+      {phase === 'done' && (
+        <>
+          <div className="five-done-banner">
+            <Trophy size={20}/> Время вышло!
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── SpyRound ───────────────────────────────────────────────────────────── */
+function SpyRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('reveal') // 'reveal' | 'discussion' | 'vote'
+  const [revealIdx, setRevealIdx] = useState(0)
+  const [showing, setShowing] = useState(false)
+  const [votes, setVotes] = useState({})
+  const [revealed, setRevealed] = useState(false)
+
+  const spyIdx = useMemo(() => Math.floor(Math.random() * players.length), [players.length])
+  const location = round.promptText
+
+  const showCard = () => { setShowing(true); haptic('impact') }
+  const hideAndNext = () => {
+    setShowing(false)
+    setTimeout(() => {
+      if (revealIdx < players.length - 1) {
+        setRevealIdx(i => i + 1)
+      } else {
+        setPhase('discussion')
+      }
+    }, 300)
+  }
+
+  const castVote = (suspectId) => {
+    setVotes(v => ({ ...v, _vote: suspectId }))
+    setRevealed(true)
+    haptic('success')
+  }
+
+  const handleNext = () => {
+    setPhase('reveal'); setRevealIdx(0); setShowing(false); setVotes({}); setRevealed(false)
+    onNext()
+  }
+
+  const currentPlayer = players[revealIdx]
+  const isSpy = revealIdx === spyIdx
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      {phase === 'reveal' && (
+        <>
+          <div className="spy-pass-banner">
+            <span>{currentPlayer.emoji}</span>
+            <strong>{currentPlayer.name}</strong>
+            <span>, смотри только ты!</span>
+          </div>
+
+          {!showing ? (
+            <button className="spy-reveal-btn" onClick={showCard}>
+              <Eye size={28}/><span>Нажми и посмотри свою роль</span>
+            </button>
+          ) : (
+            <div className={`spy-card ${isSpy ? 'spy-card-spy' : 'spy-card-agent'}`}>
+              {isSpy ? (
+                <>
+                  <div className="spy-card-icon">🕵️</div>
+                  <div className="spy-card-title">Ты ШПИОН!</div>
+                  <div className="spy-card-sub">Не знаешь локацию. Веди себя естественно — задавай вопросы и не раскрывайся.</div>
+                </>
+              ) : (
+                <>
+                  <div className="spy-card-icon">📍</div>
+                  <div className="spy-card-title">Локация</div>
+                  <div className="spy-card-location">{location}</div>
+                  <div className="spy-card-sub">Ты знаешь локацию. Отвечай осторожно — помоги вычислить шпиона.</div>
+                </>
+              )}
+              <button className="btn-secondary mt-16" onClick={hideAndNext}>
+                <Check size={16}/> Запомнил, закрыть
+              </button>
+            </div>
+          )}
+
+          <div className="spy-progress-dots">
+            {players.map((_, i) => (
+              <div key={i} className={`spy-dot ${i < revealIdx ? 'done' : i === revealIdx ? 'current' : ''}`}/>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'discussion' && (
+        <>
+          <div className="prompt-card">
+            <div className="prompt-type"><Eye size={12}/> Обсуждение</div>
+            <div className="prompt-text" style={{fontSize:17}}>Задавайте вопросы по кругу.<br/>Кто ведёт себя подозрительно?</div>
+          </div>
+          <div className="spy-discussion-hint">
+            <ShieldCheck size={14}/> Локация была: <strong>скрыта до голосования</strong>
+          </div>
+          <button className="btn-primary mt-16" onClick={() => setPhase('vote')}>
+            <Target size={17}/> Голосовать за шпиона
+          </button>
+        </>
+      )}
+
+      {phase === 'vote' && !revealed && (
+        <>
+          <p className="eyebrow" style={{margin:'8px 0 12px'}}><Target size={12}/> Кто шпион?</p>
+          <div className="vote-player-grid">
+            {players.map(p => (
+              <button key={p.id} className="vote-player-btn" onClick={() => castVote(p.id)}>
+                <span className="vote-emoji">{p.emoji}</span>
+                <span className="vote-name">{p.name}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'vote' && revealed && (
+        <>
+          <div className="spy-reveal-result">
+            <div className="spy-result-location">
+              <span>📍 Локация была:</span>
+              <strong>{location}</strong>
+            </div>
+            <div className="spy-result-who">
+              <span>🕵️ Шпион:</span>
+              <strong>{players[spyIdx].emoji} {players[spyIdx].name}</strong>
+            </div>
+            {votes._vote === players[spyIdx].id
+              ? <div className="spy-result-verdict spy-caught">✅ Шпион пойман!</div>
+              : <div className="spy-result-verdict spy-escaped">😈 Шпион скрылся!</div>
+            }
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── AliasRound ─────────────────────────────────────────────────────────── */
+function AliasRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('ready') // 'ready' | 'playing' | 'done'
+  const [timeLeft, setTimeLeft] = useState(60)
+  const [wordIdx, setWordIdx] = useState(0)
+  const [score, setScore] = useState({ correct: 0, skipped: 0 })
+  const activePlayer = players[roundIndex % players.length]
+  const words = game.samplePrompts
+
+  useEffect(() => {
+    if (phase !== 'playing') return
+    if (timeLeft <= 0) { setPhase('done'); haptic('success'); return }
+    const t = setTimeout(() => setTimeLeft(s => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [phase, timeLeft, haptic])
+
+  const startGame = () => { setPhase('playing'); setTimeLeft(60); setWordIdx(0); setScore({ correct: 0, skipped: 0 }) }
+
+  const correct = () => {
+    haptic('impact')
+    setScore(s => ({ ...s, correct: s.correct + 1 }))
+    setWordIdx(i => Math.min(i + 1, words.length - 1))
+  }
+  const skip = () => {
+    setScore(s => ({ ...s, skipped: s.skipped + 1 }))
+    setWordIdx(i => Math.min(i + 1, words.length - 1))
+  }
+
+  const handleNext = () => { setPhase('ready'); setScore({ correct: 0, skipped: 0 }); onNext() }
+  const urgentTime = timeLeft <= 10
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">объясняет</div>
+        </div>
+      </div>
+
+      {phase === 'ready' && (
+        <>
+          <div className="alias-rules-card">
+            <p className="eyebrow"><MessageCircle size={12}/> Правила</p>
+            <p style={{fontSize:14,color:'var(--muted)',marginTop:8,lineHeight:1.6}}>
+              Объясняй слова за 60 секунд.<br/>
+              Нельзя называть однокоренные слова.<br/>
+              Остальные угадывают.
+            </p>
+          </div>
+          <button className="btn-primary mt-16" onClick={startGame}><Play size={17}/> Старт!</button>
+        </>
+      )}
+
+      {phase === 'playing' && (
+        <>
+          <div className={`alias-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}с</div>
+          <div className="alias-word-card" key={wordIdx}>
+            <div className="alias-word">{words[wordIdx % words.length].text}</div>
+          </div>
+          <div className="alias-score-row">
+            <span className="alias-score-correct">✅ {score.correct}</span>
+            <span className="alias-score-skipped">⏭️ {score.skipped}</span>
+          </div>
+          <div className="alias-action-row">
+            <button className="alias-btn-correct" onClick={correct}><Check size={20}/> Угадали</button>
+            <button className="alias-btn-skip" onClick={skip}><ChevronRight size={20}/> Пропустить</button>
+          </div>
+        </>
+      )}
+
+      {phase === 'done' && (
+        <>
+          <div className="alias-result-card">
+            <div className="alias-result-score">{score.correct}</div>
+            <div className="alias-result-label">слов угадано</div>
+            {score.skipped > 0 && <div style={{fontSize:13,color:'var(--muted)',marginTop:4}}>пропущено: {score.skipped}</div>}
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── WhoAmIRound ────────────────────────────────────────────────────────── */
+function WhoAmIRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('setup') // 'setup' | 'playing'
+  const [qCount, setQCount] = useState(0)
+  const activePlayer = players[roundIndex % players.length]
+  const character = round.promptText
+
+  const handleAnswer = (ans) => {
+    haptic(ans === 'yes' ? 'impact' : 'selection')
+    setQCount(c => c + 1)
+  }
+  const handleGuessed = () => { haptic('success'); onNext() }
+  const handleNext = () => { setPhase('setup'); setQCount(0); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      {phase === 'setup' && (
+        <>
+          <div className="whoami-setup-card">
+            <div className="prompt-type"><Search size={12}/> Персонаж для {activePlayer.name}</div>
+            <div className="whoami-character">{character}</div>
+            <p style={{fontSize:13,color:'var(--muted)',marginTop:12,lineHeight:1.55}}>
+              Покажи всем, кроме <strong>{activePlayer.name}</strong>.<br/>
+              Потом передай телефон.
+            </p>
+          </div>
+          <button className="btn-primary mt-16" onClick={() => setPhase('playing')}>
+            <Eye size={17}/> {activePlayer.name} готов(а)
+          </button>
+        </>
+      )}
+
+      {phase === 'playing' && (
+        <>
+          <div className="whoami-playing-banner">
+            <span>{activePlayer.emoji}</span>
+            <div>
+              <strong>{activePlayer.name}</strong>
+              <span>задаёт вопросы</span>
+            </div>
+            <div className="whoami-q-count">{qCount} вопр.</div>
+          </div>
+
+          <div className="prompt-card" style={{textAlign:'center'}}>
+            <div className="prompt-type"><Search size={12}/> Кто ты?</div>
+            <div className="prompt-text" style={{fontSize:17}}>Задавай вопросы — только «Да» или «Нет»</div>
+            <div style={{fontSize:13,color:'var(--muted)',marginTop:10}}>Уже задано: {qCount} вопросов</div>
+          </div>
+
+          <div className="whoami-answer-row">
+            <button className="whoami-btn-yes" onClick={() => handleAnswer('yes')}><Check size={22}/> Да</button>
+            <button className="whoami-btn-no" onClick={() => handleAnswer('no')}><X size={22}/> Нет</button>
+          </div>
+
+          <button className="btn-secondary mt-12" onClick={handleGuessed}>
+            <CircleCheck size={16}/> Угадал(а)!
+          </button>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── FactGuessRound ─────────────────────────────────────────────────────── */
+function FactGuessRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('input') // 'input' | 'guess' | 'reveal'
+  const [inputIdx, setInputIdx] = useState(0)
+  const [facts, setFacts] = useState([])
+  const [currentFact, setCurrentFact] = useState('')
+  const [guessIdx, setGuessIdx] = useState(0)
+  const [guesses, setGuesses] = useState({})
+
+  const submitFact = () => {
+    if (!currentFact.trim()) return
+    const p = players[inputIdx]
+    setFacts(f => [...f, { playerId: p.id, playerName: p.name, emoji: p.emoji, text: currentFact.trim() }])
+    setCurrentFact('')
+    if (inputIdx < players.length - 1) setInputIdx(i => i + 1)
+    else setPhase('guess')
+    haptic('impact')
+  }
+
+  const shuffledFacts = useMemo(() => {
+    if (facts.length < players.length) return []
+    return [...facts].sort(() => Math.random() - 0.5)
+  }, [facts, players.length])
+
+  const castGuess = (playerId) => {
+    haptic()
+    setGuesses(g => ({ ...g, [guessIdx]: playerId }))
+    if (guessIdx < shuffledFacts.length - 1) setGuessIdx(i => i + 1)
+    else setPhase('reveal')
+  }
+
+  const handleNext = () => {
+    setPhase('input'); setInputIdx(0); setFacts([]); setCurrentFact(''); setGuessIdx(0); setGuesses({})
+    onNext()
+  }
+
+  const currentInputPlayer = players[inputIdx]
+  const currentGuessFact = shuffledFacts[guessIdx]
+  const correctCount = shuffledFacts.filter((f, i) => guesses[i] === f.playerId).length
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      {phase === 'input' && (
+        <>
+          <div className="active-player-banner">
+            <span className="active-player-emoji">{currentInputPlayer.emoji}</span>
+            <div>
+              <div className="active-player-name">{currentInputPlayer.name}</div>
+              <div className="active-player-sub">пишет факт о себе</div>
+            </div>
+          </div>
+          <div className="fact-input-card">
+            <p style={{fontSize:13,color:'var(--muted)',marginBottom:10,lineHeight:1.5}}>
+              Напиши один правдивый факт о себе — что-то неожиданное!
+            </p>
+            <textarea
+              className="fact-textarea"
+              placeholder="Например: «Я однажды застрял в лифте на 3 часа»"
+              value={currentFact}
+              onChange={e => setCurrentFact(e.target.value)}
+              rows={3}
+            />
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:12}}>
+            <div className="fact-player-dots">
+              {players.map((p, i) => (
+                <div key={p.id} className={`fact-dot ${i < inputIdx ? 'done' : i === inputIdx ? 'current' : ''}`}/>
+              ))}
+            </div>
+            <button className="btn-primary" style={{flex:1}} onClick={submitFact} disabled={!currentFact.trim()}>
+              <Check size={17}/> Готово
+            </button>
+          </div>
+        </>
+      )}
+
+      {phase === 'guess' && currentGuessFact && (
+        <>
+          <div className="prompt-card">
+            <div className="prompt-type"><Heart size={12}/> Факт {guessIdx + 1} из {shuffledFacts.length}</div>
+            <div className="prompt-text" style={{fontSize:17}}>«{currentGuessFact.text}»</div>
+            <div className="prompt-player">Чей это факт?</div>
+          </div>
+          <div className="vote-player-grid">
+            {players.map(p => (
+              <button key={p.id} className="vote-player-btn" onClick={() => castGuess(p.id)}>
+                <span className="vote-emoji">{p.emoji}</span>
+                <span className="vote-name">{p.name}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'reveal' && (
+        <>
+          <div className="fact-reveal-score">
+            <div className="alias-result-score">{correctCount}</div>
+            <div className="alias-result-label">правильных угадок из {shuffledFacts.length}</div>
+          </div>
+          <div className="fact-reveal-list">
+            {shuffledFacts.map((f, i) => (
+              <div key={i} className={`fact-reveal-item ${guesses[i] === f.playerId ? 'correct' : 'wrong'}`}>
+                <div className="fact-reveal-text">«{f.text}»</div>
+                <div className="fact-reveal-owner">{f.emoji} {f.playerName} {guesses[i] === f.playerId ? '✅' : '❌'}</div>
+              </div>
+            ))}
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── MemeBattleRound ────────────────────────────────────────────────────── */
+function MemeBattleRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('input') // 'input' | 'vote' | 'reveal'
+  const [inputIdx, setInputIdx] = useState(0)
+  const [captions, setCaptions] = useState([])
+  const [currentCaption, setCurrentCaption] = useState('')
+  const [votes, setVotes] = useState([])
+  const [votePhaseIdx, setVotePhaseIdx] = useState(0)
+
+  const submitCaption = () => {
+    if (!currentCaption.trim()) return
+    const p = players[inputIdx]
+    setCaptions(c => [...c, { playerId: p.id, playerName: p.name, emoji: p.emoji, text: currentCaption.trim() }])
+    setCurrentCaption('')
+    if (inputIdx < players.length - 1) setInputIdx(i => i + 1)
+    else setPhase('vote')
+    haptic('impact')
+  }
+
+  const shuffledCaptions = useMemo(() => {
+    if (captions.length < players.length) return []
+    return captions.map((c, origIdx) => ({ ...c, origIdx })).sort(() => Math.random() - 0.5)
+  }, [captions, players.length])
+
+  const castVote = (captionIdx) => {
+    haptic()
+    setVotes(v => [...v, captionIdx])
+    if (votePhaseIdx < players.length - 1) setVotePhaseIdx(i => i + 1)
+    else setPhase('reveal')
+  }
+
+  const voteCounts = shuffledCaptions.map((_, i) => votes.filter(v => v === i).length)
+  const winnerIdx = voteCounts.length > 0 ? voteCounts.indexOf(Math.max(...voteCounts)) : 0
+  const winner = shuffledCaptions[winnerIdx]
+
+  const handleNext = () => {
+    setPhase('input'); setInputIdx(0); setCaptions([]); setCurrentCaption(''); setVotes([]); setVotePhaseIdx(0)
+    onNext()
+  }
+
+  const currentInputPlayer = players[inputIdx]
+  const currentVoter = players[votePhaseIdx]
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      {phase === 'input' && (
+        <>
+          <div className="prompt-card" style={{marginBottom:14}}>
+            <div className="prompt-type"><Laugh size={12}/> Ситуация</div>
+            <div className="prompt-text" style={{fontSize:17}}>{round.promptText}</div>
+          </div>
+
+          <div className="active-player-banner">
+            <span className="active-player-emoji">{currentInputPlayer.emoji}</span>
+            <div>
+              <div className="active-player-name">{currentInputPlayer.name}</div>
+              <div className="active-player-sub">пишет подпись к мему</div>
+            </div>
+          </div>
+
+          <div className="fact-input-card">
+            <textarea
+              className="fact-textarea"
+              placeholder="Напиши смешную подпись к этой ситуации…"
+              value={currentCaption}
+              onChange={e => setCurrentCaption(e.target.value)}
+              rows={3}
+            />
+          </div>
+
+          <div style={{display:'flex',gap:8,marginTop:12}}>
+            <div className="fact-player-dots">
+              {players.map((_, i) => (
+                <div key={i} className={`fact-dot ${i < inputIdx ? 'done' : i === inputIdx ? 'current' : ''}`}/>
+              ))}
+            </div>
+            <button className="btn-primary" style={{flex:1}} onClick={submitCaption} disabled={!currentCaption.trim()}>
+              <Check size={17}/> Готово
+            </button>
+          </div>
+        </>
+      )}
+
+      {phase === 'vote' && (
+        <>
+          <div className="active-player-banner">
+            <span className="active-player-emoji">{currentVoter.emoji}</span>
+            <div>
+              <div className="active-player-name">{currentVoter.name}</div>
+              <div className="active-player-sub">голосует</div>
+            </div>
+          </div>
+
+          <p className="eyebrow" style={{margin:'12px 0 10px'}}><Trophy size={12}/> Лучшая подпись?</p>
+
+          <div className="meme-caption-list">
+            {shuffledCaptions.map((c, i) => (
+              <button key={i} className="meme-caption-btn" onClick={() => castVote(i)}>
+                <span className="meme-caption-num">{i + 1}</span>
+                <span className="meme-caption-text">«{c.text}»</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'reveal' && winner && (
+        <>
+          <div className="meme-winner-card">
+            <div className="meme-winner-label">🏆 Лучший мем</div>
+            <div className="meme-winner-text">«{winner.text}»</div>
+            <div className="meme-winner-author">{winner.emoji} {winner.playerName} · {voteCounts[winnerIdx]} голосов</div>
+          </div>
+          <div className="fact-reveal-list" style={{marginTop:10}}>
+            {shuffledCaptions.map((c, i) => (
+              <div key={i} className="fact-reveal-item">
+                <div className="fact-reveal-text">«{c.text}»</div>
+                <div className="fact-reveal-owner">{c.emoji} {c.playerName} — {voteCounts[i]} голос(ов)</div>
+              </div>
+            ))}
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── GenericRound ───────────────────────────────────────────────────────── */
+function GenericRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [reaction, setReaction] = useState(null)
+  const activePlayer = players[roundIndex % players.length]
+  const handleNext = () => { setReaction(null); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">ход игрока</div>
+        </div>
+      </div>
+      <div className="prompt-card">
+        <div className="prompt-type"><Sparkles size={12}/> {round.promptType}</div>
+        <div className="prompt-text">{round.promptText}</div>
+      </div>
+      <div className="reactions-row" role="group" aria-label="Реакции">
+        {['😂','😳','🔥','💀','🕵️'].map(r => (
+          <button key={r} className={`reaction-btn ${reaction === r ? 'tapped' : ''}`}
+            onClick={() => { setReaction(r); haptic() }} aria-pressed={reaction === r}>{r}</button>
+        ))}
+      </div>
+      <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
     </div>
   )
 }
