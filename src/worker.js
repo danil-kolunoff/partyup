@@ -5,6 +5,13 @@
 
 const WEBAPP_URL = 'https://partyup.danil-kolunoff.workers.dev';
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 async function tg(env, method, payload) {
   const res = await fetch(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,
@@ -32,11 +39,23 @@ async function handleUpdate(update, env) {
   };
 
   if (cmd === '/start' || cmd === '/play') {
+    const firstName = msg.from?.first_name || 'друг';
     await tg(env, 'sendMessage', {
       chat_id: chatId,
+      parse_mode: 'HTML',
       text:
-        '🎉 PartyUp — 11 игр для вечеринки в одной коробке.\n\n' +
-        'Жми кнопку и зови друзей.',
+        `Привет, <b>${escapeHtml(firstName)}</b>! 🎉\n\n` +
+        '<b>PartyUp</b> — коробка с играми для шумной компании. ' +
+        'Ничего не надо устанавливать: открыл, выбрал игру — играешь.\n\n' +
+        '🎴 <b>11 игр в одном приложении</b>\n' +
+        '   Элиас, Крокодил, Шпион, Мем-батл, 5 секунд, «Кто я?» и ещё 5\n' +
+        '👥 <b>От 2 до 20 человек</b>\n' +
+        '   На одном телефоне, по очереди — или сидя в кружок\n' +
+        '⚡ <b>Старт за 3 секунды</b>\n' +
+        '   Без регистрации, аккаунтов и инструкций\n' +
+        '🆓 <b>Бесплатно навсегда</b>\n' +
+        '   Без рекламы и платных карточек\n\n' +
+        '👇 Жми кнопку и зови друзей',
       reply_markup: playButton,
     });
     return;
@@ -45,11 +64,14 @@ async function handleUpdate(update, env) {
   if (cmd === '/help') {
     await tg(env, 'sendMessage', {
       chat_id: chatId,
+      parse_mode: 'HTML',
       text:
-        'PartyUp — это набор вечериночных игр прямо в Telegram.\n\n' +
-        'Что внутри: Элиас, Крокодил, Шпион, Мем-батл, 5 секунд и ещё 6 игр.\n' +
-        'Бесплатно, без рекламы.\n\n' +
-        'Открой кнопку «🎮 Играть» — снизу или в меню.',
+        '<b>Как это работает</b>\n\n' +
+        '1. Жми «🎮 Играть» — откроется коробка с играми\n' +
+        '2. Выбирай игру под настроение компании\n' +
+        '3. Передавайте телефон по кругу или играйте на одном экране\n\n' +
+        'Если что-то не работает или есть идея — напиши прямо сюда, ' +
+        'мы читаем все сообщения.',
       reply_markup: playButton,
     });
     return;
