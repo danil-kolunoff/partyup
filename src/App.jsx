@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Zap, Users, Heart, Star, Timer, Eye, Theater, MessageCircle,
+  Users, Heart, Star, Timer, Eye, Theater, MessageCircle,
   Laugh, Target, Search, Trophy, Settings, Share2, ChevronRight,
   Play, Sparkles, Flame, Moon, Wind, Crown, Check, X,
   ShieldCheck, Info, PartyPopper, Rocket, Siren,
@@ -80,6 +80,24 @@ const VIBE_ICONS_MAP = {
 function VibeIcon({ vibeId, size = 18, ...props }) {
   const Icon = VIBE_ICONS_MAP[vibeId] || Sparkles
   return <Icon size={size} {...props} />
+}
+
+/* ─── PressBtn ──────────────────────────────────────────────────────────── */
+// Даёт красивую press-реакцию и выдерживает задержку перед переходом
+function PressBtn({ onClick, delay = 180, className = '', children, style, ...props }) {
+  const [pressing, setPressing] = useState(false)
+  const tRef = useRef(null)
+  const handle = useCallback(() => {
+    if (pressing) return
+    setPressing(true)
+    tRef.current = setTimeout(() => { setPressing(false); onClick?.() }, delay)
+  }, [onClick, delay, pressing])
+  useEffect(() => () => { clearTimeout(tRef.current) }, [])
+  return (
+    <button {...props} className={`${className}${pressing ? ' is-pressing' : ''}`} style={style} onClick={handle}>
+      {children}
+    </button>
+  )
 }
 
 const REACTIONS_LIST = ['😂','😳','🔥','💀','🕵️']
@@ -235,8 +253,7 @@ export default function App() {
 
       <main className="screen-frame" key={screen}>
         {screen === SCREENS.HOME &&
-          <HomeScreen picker={picker} setPicker={setPicker} recommendations={recommendations}
-            onQuickMix={() => { const g = recommendations[0]||GAMES[0]; setSelectedGameId(g.id); createLobby() }}
+          <HomeScreen picker={picker} setPicker={setPicker}
             onPicker={() => navigate(SCREENS.PICKER)} onGame={openGame} />}
         {screen === SCREENS.PICKER &&
           <PickerScreen picker={picker} setPicker={setPicker} recommendations={recommendations} onSelect={openGame} />}
@@ -313,25 +330,16 @@ function WelcomeModal({ onClose }) {
 }
 
 /* ─── HomeScreen ──────────────────────────────────────────────────────────── */
-function HomeScreen({ picker, setPicker, recommendations, onQuickMix, onPicker, onGame }) {
+function HomeScreen({ picker, setPicker, onPicker, onGame }) {
   const activeVibe = VIBES.find(v => v.id === picker.vibe) || VIBES[0]
   const hot = useMemo(() => GAMES.filter(g => g.hot).slice(0, 6), [])
 
   return (
     <div>
-      {/* Hero */}
-      <div className="hero-card">
-        <p className="eyebrow"><PartyPopper size={13}/> Всё готово</p>
-        <h1>Запусти<br/><span className="gradient-text">вечеринку</span></h1>
-        <p className="lead">Умный ведущий — подберёт игру под компанию, проведёт раунд и создаст атмосферу.</p>
-        <div className="hero-actions">
-          <button className="btn-primary" onClick={onQuickMix}>
-            <Zap size={18}/> Быстрый микс
-          </button>
-          <button className="btn-secondary" onClick={onPicker}>
-            <Target size={17}/> Подобрать игру
-          </button>
-        </div>
+      {/* Greeting */}
+      <div className="home-greeting">
+        <h1>Вайб<br/><span className="gradient-text">вечеринки</span></h1>
+        <p className="lead">Выбери настроение — подберём игру и контент под компанию</p>
       </div>
 
       {/* Vibe Section */}
@@ -371,13 +379,13 @@ function HomeScreen({ picker, setPicker, recommendations, onQuickMix, onPicker, 
           <Flame size={16} style={{display:'inline',marginRight:6,color:'#ff9500'}}/>
           Популярно
         </span>
-        <button className="btn-ghost" style={{minHeight:30,fontSize:13}} onClick={onPicker}>
-          Все игры <ChevronRight size={14}/>
-        </button>
+        <PressBtn className="btn-suggest" onClick={onPicker} delay={160}>
+          <Sparkles size={14}/> Подобрать игру
+        </PressBtn>
       </div>
       <div className="game-list">
         {hot.map(g => (
-          <button key={g.id} className="game-row-item card-shimmer" onClick={() => onGame(g.id)}>
+          <PressBtn key={g.id} className="game-row-item" onClick={() => onGame(g.id)} delay={180}>
             <div className="game-icon-token">
               <GameIcon gameId={g.id} size={22} color="var(--accent-2)"/>
             </div>
@@ -393,7 +401,7 @@ function HomeScreen({ picker, setPicker, recommendations, onQuickMix, onPicker, 
               </div>
             </div>
             <ChevronRight size={16} className="game-row-arrow"/>
-          </button>
+          </PressBtn>
         ))}
       </div>
     </div>
