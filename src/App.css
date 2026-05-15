@@ -69,16 +69,33 @@
   width: 42px; height: 42px; border-radius: 14px; flex-shrink: 0;
   background: linear-gradient(135deg, var(--accent) 0%, #a78bfa 50%, #c084fc 100%);
   display: grid; place-items: center;
-  font-size: 11px; font-weight: 900; color: #fff; letter-spacing: -0.5px;
-  box-shadow: var(--shadow-glow), inset 0 1px 0 rgba(255,255,255,0.25);
+  box-shadow: 0 4px 20px rgba(124,111,255,0.52), inset 0 1px 0 rgba(255,255,255,0.3);
   position: relative; overflow: hidden;
+  animation: brand-pulse 3.2s ease-in-out infinite;
 }
+@keyframes brand-pulse {
+  0%,100% { box-shadow: 0 4px 20px rgba(124,111,255,0.52), inset 0 1px 0 rgba(255,255,255,0.3); filter: hue-rotate(0deg) brightness(1); }
+  35%     { box-shadow: 0 6px 30px rgba(167,139,250,0.7),  inset 0 1px 0 rgba(255,255,255,0.35); filter: hue-rotate(28deg) brightness(1.12); }
+  65%     { box-shadow: 0 5px 26px rgba(192,132,252,0.6),  inset 0 1px 0 rgba(255,255,255,0.28); filter: hue-rotate(-18deg) brightness(1.06); }
+}
+/* Spinning conic sweep */
+.brand-mark::before {
+  content: '';
+  position: absolute;
+  width: 200%; height: 200%; top: -50%; left: -50%;
+  background: conic-gradient(from 0deg, transparent 68%, rgba(255,255,255,0.2) 80%, transparent 93%);
+  animation: spin 4s linear infinite;
+  z-index: 0;
+}
+.brand-mark > svg { position: relative; z-index: 1; }
+/* Shimmer overlay */
 .brand-mark::after {
   content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(105deg, transparent 35%, rgba(255,255,255,0.18) 50%, transparent 65%);
+  position: absolute; inset: 0; z-index: 2;
+  background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,0.22) 50%, transparent 70%);
   background-size: 200% 100%;
   animation: shimmer 3.5s ease-in-out infinite;
+  pointer-events: none;
 }
 .brand-text { min-width: 0; }
 .brand-name { font-size: 17px; font-weight: 750; line-height: 1.1; }
@@ -207,26 +224,30 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 }
 .btn-ghost:hover { background: var(--accent-dim); }
 
-/* Magic suggest button */
+/* Magic suggest button — gradient primary, compact */
 .btn-suggest {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 6px 14px; border-radius: 100px;
-  background: var(--accent-dim); border: 1.5px solid var(--accent-border);
-  color: var(--accent-2); font-size: 12px; font-weight: 700;
-  box-shadow: 0 2px 14px rgba(124,111,255,0.20);
-  transition: all var(--fast) var(--ease-out);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: var(--r-sm);
+  background: linear-gradient(135deg, var(--accent) 0%, #9333ea 100%);
+  color: #fff; font-size: 13px; font-weight: 700;
+  box-shadow: 0 3px 16px rgba(124,111,255,0.38);
+  transition: box-shadow var(--fast) var(--ease-out);
   animation: pulse-glow 4s ease-in-out infinite;
-  letter-spacing: 0.01em;
+  position: relative; overflow: hidden;
 }
-.btn-suggest:hover {
-  background: rgba(124,111,255,0.18);
-  box-shadow: 0 4px 22px rgba(124,111,255,0.32);
+/* Shine overlay */
+.btn-suggest::after {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 50%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.14), transparent);
+  border-radius: inherit; pointer-events: none;
 }
+.btn-suggest:hover { box-shadow: 0 5px 24px rgba(124,111,255,0.55); animation: none; }
 .btn-suggest.is-pressing {
   transform: scale(0.91) !important;
-  opacity: 0.75;
+  filter: brightness(0.88);
   animation: none !important;
-  transition: transform 0.07s ease-out, opacity 0.07s !important;
+  transition: transform 0.07s ease-out, filter 0.07s !important;
 }
 
 /* ════════════════════════════════════════════════
@@ -342,8 +363,39 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   margin-bottom: 12px;
 }
 .vibe-section-title {
-  font-size: 18px; font-weight: 750; letter-spacing: -0.01em;
-  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  font-size: 26px; font-weight: 800; letter-spacing: -0.025em;
+  display: flex; align-items: center; gap: 12px; margin-bottom: 6px;
+}
+
+/* Vibe title icon — iridescent/aurora effect */
+.vibe-title-icon {
+  width: 40px; height: 40px; border-radius: 13px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent) 0%, #a78bfa 55%, #c084fc 100%);
+  display: grid; place-items: center;
+  position: relative; overflow: hidden;
+  box-shadow: 0 4px 22px rgba(124,111,255,0.5);
+  animation: vibe-aurora 3.5s ease-in-out infinite;
+}
+@keyframes vibe-aurora {
+  0%,100% { box-shadow: 0 4px 22px rgba(124,111,255,0.5);  filter: hue-rotate(0deg)   brightness(1); }
+  30%     { box-shadow: 0 5px 28px rgba(167,139,250,0.65); filter: hue-rotate(40deg)  brightness(1.15); }
+  60%     { box-shadow: 0 5px 26px rgba(96,165,250,0.55);  filter: hue-rotate(190deg) brightness(1.08); }
+}
+.vibe-title-icon > svg { position: relative; z-index: 1; }
+.vibe-title-icon::before {
+  content: '';
+  position: absolute;
+  width: 200%; height: 200%; top: -50%; left: -50%;
+  background: conic-gradient(from 0deg, transparent 62%, rgba(255,255,255,0.22) 75%, transparent 90%);
+  animation: spin 3.2s linear infinite;
+  z-index: 0;
+}
+.vibe-title-icon::after {
+  content: '';
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  background: linear-gradient(105deg, transparent 28%, rgba(255,255,255,0.24) 50%, transparent 72%);
+  background-size: 200% 100%;
+  animation: shimmer 2.4s ease-in-out infinite;
 }
 .vibe-section-desc { font-size: 13px; color: var(--muted); line-height: 1.55; }
 .vibe-section-desc strong { color: var(--accent-2); font-weight: 600; }
