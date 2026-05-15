@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Users, Heart, Star, Timer, Eye, Theater, MessageCircle,
   Laugh, Target, Search, Trophy, Settings, Share2, ChevronRight,
-  Play, Sparkles, Flame, Moon, Wind, Crown, Check, X, Wand2,
+  Play, Sparkles, Flame, Moon, Wind, Crown, Check, X, Compass,
   ShieldCheck, Info, PartyPopper, Rocket, Siren,
   UserPlus, Copy, ArrowLeft, Home, RotateCcw, Send,
   CircleCheck, Clock, Brain, Handshake, Dices,
@@ -233,10 +233,10 @@ export default function App() {
 
       <header className="app-header" role="banner">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true"><Dices size={19} color="white"/></div>
+          <div className="brand-mark" aria-hidden="true"><Dices size={26} color="white"/></div>
           <div className="brand-text">
             <div className="brand-name">PartyUp</div>
-            <div className="brand-sub">Игры для шумной компании</div>
+            <div className="brand-sub">Игры для весёлой компании</div>
           </div>
         </div>
         <div className="header-actions">
@@ -340,13 +340,13 @@ function HomeScreen({ picker, setPicker, onPicker, onGame }) {
       <div className="vibe-section">
         <div className="vibe-section-header">
           <div className="vibe-section-title">
-            <div className="vibe-title-icon" aria-hidden="true">
-              <Sparkles size={18} color="white"/>
+            <div className="vibe-icon-glow" aria-hidden="true">
+              <Sparkles size={32} color="var(--accent-2)"/>
             </div>
             Вайб компании
           </div>
           <p className="vibe-section-desc">
-            Выбери настроение — и приложение адаптирует <strong>вопросы, задания и контент</strong> под твою компанию. Сейчас: <strong>{activeVibe.label}</strong>
+            Выбери настроение — и приложение адаптирует <strong>вопросы, задания и контент</strong> под твою компанию.
           </p>
         </div>
         <div className="vibe-scroll" role="listbox" aria-label="Выбор вайба">
@@ -376,7 +376,7 @@ function HomeScreen({ picker, setPicker, onPicker, onGame }) {
           Популярно
         </span>
         <PressBtn className="btn-suggest" onClick={onPicker} delay={160}>
-          <Wand2 size={14}/> Подобрать игру
+          <Compass size={14}/> Подобрать игру
         </PressBtn>
       </div>
       <div className="game-list">
