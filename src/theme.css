@@ -1,0 +1,57 @@
+:root {
+  --bg: #100821;
+  --bg-deep: #080511;
+  --surface: rgba(255, 255, 255, 0.07);
+  --surface-strong: rgba(255, 255, 255, 0.12);
+  --surface-hot: rgba(255, 92, 138, 0.16);
+  --border: rgba(255, 255, 255, 0.15);
+  --border-strong: rgba(255, 255, 255, 0.28);
+  --text: #fff8ff;
+  --muted: #b8a9d9;
+  --dim: #776a97;
+  --violet: #7c5cff;
+  --purple: #b14bff;
+  --magenta: #ff4fb8;
+  --pink: #ff6d93;
+  --amber: #ffd45a;
+  --orange: #ff8a3d;
+  --cyan: #55dcff;
+  --green: #66f2a4;
+  --red: #ff4f68;
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+  --glow: 0 0 34px rgba(255, 79, 184, 0.34), 0 0 60px rgba(124, 92, 255, 0.22);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(255, 79, 184, 0.26), transparent 34%),
+    radial-gradient(circle at 86% 12%, rgba(85, 220, 255, 0.18), transparent 30%),
+    linear-gradient(160deg, #170934 0%, #0f0925 46%, #07040f 100%);
+  color: var(--text);
+  overflow-x: hidden;
+}
+
+button {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(85, 220, 255, 0.75);
+  outline-offset: 3px;
+}
