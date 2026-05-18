@@ -912,7 +912,7 @@ export default function App() {
             }}
             onHome={goHome} />}
         {screen === SCREENS.SETTINGS &&
-          <SettingsScreen settings={settings} setSettings={setSettings} onBack={goBack} />}
+          <SettingsScreen settings={settings} setSettings={setSettings} onBack={goBack} auth={auth} />}
         {screen === SCREENS.PROFILE &&
           <ProfileScreen auth={auth} onBack={goBack}
             onReturnToGame={profileFromGame ? () => {
@@ -4350,7 +4350,6 @@ function isAdminAuth(auth) {
 }
 
 function ProfileScreen({ auth, onReturnToGame }) {
-  const showAdmin = isAdminAuth(auth)
   return (
     <div>
       <p className="eyebrow"><Users size={13}/> Профиль</p>
@@ -4363,35 +4362,38 @@ function ProfileScreen({ auth, onReturnToGame }) {
         )}
       </div>
       <ProfileCard auth={auth} />
-      {showAdmin && (
-        <button
-          className="btn-secondary"
-          style={{marginTop: 16, width: '100%'}}
-          onClick={async () => {
-            // Mini App открывает внешний браузер через tg.openLink — он не
-            // несёт initData/cookie. Поэтому сначала просим у сервера токен
-            // (server проверит initData, что это реально админ), потом
-            // подставляем токен в URL.
-            try {
-              const r = await api.adminToken()
-              if (!r?.token) throw new Error(r?.error || 'no_token')
-              const url = `${window.location.origin}/api/admin/vault?token=${encodeURIComponent(r.token)}`
-              const tg = window.Telegram?.WebApp
-              if (tg?.openLink) tg.openLink(url, { try_instant_view: false })
-              else window.open(url, '_blank', 'noopener')
-            } catch (e) {
-              alert('Не удалось получить токен админки: ' + (e?.message || 'unknown'))
-            }
-          }}
-        >
-          <ShieldCheck size={16}/> Открыть админку
-        </button>
-      )}
     </div>
   )
 }
 
-function SettingsScreen({ settings, setSettings, onBack }) {
+// Открытие админки: 1) получить токен по initData/cookie,
+// 2) открыть /api/admin/vault?token=… во внешнем браузере.
+// Используется только из SettingsScreen у админа.
+async function openAdminPanel() {
+  let token = null
+  try {
+    const r = await api.adminToken()
+    token = r?.token
+    if (!token) {
+      const why = r?.error ? `сервер ответил: ${r.error}` : 'сервер не вернул token'
+      alert(`Не удалось получить токен админки.\n${why}`)
+      return
+    }
+  } catch (e) {
+    alert('Сеть/ошибка при запросе токена: ' + (e?.message || 'unknown'))
+    return
+  }
+  const url = `${window.location.origin}/api/admin/vault?token=${encodeURIComponent(token)}`
+  const tg = window.Telegram?.WebApp
+  try { if (tg?.openLink) { tg.openLink(url, { try_instant_view: false }); return } } catch {}
+  const w = window.open(url, '_blank', 'noopener')
+  if (!w) {
+    try { await navigator.clipboard?.writeText(url) } catch {}
+    alert(`Браузер заблокировал popup. Ссылка скопирована в буфер обмена.\n\n${url}`)
+  }
+}
+
+function SettingsScreen({ settings, setSettings, onBack, auth }) {
   const [hapticsOn, setHapticsOn] = useState(() => localStorage.getItem('pu_haptics') !== 'off')
   const [theme, setTheme] = useState(() => localStorage.getItem('pu_theme') || 'dark')
 
@@ -4473,6 +4475,25 @@ function SettingsScreen({ settings, setSettings, onBack }) {
           </div>
         </div>
       </div>
+
+      {/* Админка — рендерится ТОЛЬКО для tg_id === ADMIN_TG_ID.
+          Двойная защита: (1) проверка id здесь скрывает кнопку у всех остальных;
+          (2) на сервере /api/admin/* и /api/admin/issue-token режут любой
+          запрос без валидной admin-сессии — даже если кто-то покажет кнопку
+          через DevTools, доступа не будет. */}
+      {isAdminAuth(auth) && (
+        <div className="card" style={{marginBottom:12}}>
+          <div className="settings-list">
+            <button className="settings-row settings-row-btn" onClick={openAdminPanel}>
+              <div>
+                <div className="settings-label"><ShieldCheck size={16}/> Админка</div>
+                <div className="settings-label-sub">Дашборд, контент, юзеры</div>
+              </div>
+              <ChevronRight size={16} color="var(--muted)"/>
+            </button>
+          </div>
+        </div>
+      )}
 
       <button className="btn-secondary" onClick={onBack}><ArrowLeft size={16}/> Назад</button>
     </div>
