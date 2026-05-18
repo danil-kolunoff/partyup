@@ -1694,27 +1694,6 @@ async function viewDashboard(root) {
       ));
     });
     root.appendChild(evWrap);
-    const grid = h('div', { class: 'grid2' }); root.appendChild(grid);
-    const maxG = Math.max(1, ...(s.topGames || []).map(r => r.n));
-    grid.appendChild(h('div', { class: 'card' },
-      h('h2', {}, 'Топ игр (за 7 дней)'),
-      ...(s.topGames || []).map(r => h('div', { class: 'bar' },
-        h('div', { class: 'label' }, r.game_id),
-        h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + (r.n/maxG*100) + '%' })),
-        h('div', { class: 'n' }, String(r.n)),
-      )),
-      (s.topGames||[]).length ? null : h('div', { class: 'muted' }, 'Пусто'),
-    ));
-    const maxV = Math.max(1, ...(s.topVibes || []).map(r => r.n));
-    grid.appendChild(h('div', { class: 'card' },
-      h('h2', {}, 'Топ вайбов (за 7 дней)'),
-      ...(s.topVibes || []).map(r => h('div', { class: 'bar' },
-        h('div', { class: 'label' }, r.vibe),
-        h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + (r.n/maxV*100) + '%' })),
-        h('div', { class: 'n' }, String(r.n)),
-      )),
-      (s.topVibes||[]).length ? null : h('div', { class: 'muted' }, 'Пусто'),
-    ));
     root.appendChild(h('h2', {}, 'Покрытие контента: игра × вайб'));
     const byGV = s.byGameVibe || [];
     const tableC = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
