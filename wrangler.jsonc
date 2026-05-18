@@ -1,11 +1,34 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "partyup",
+  "account_id": "e55556b3edfc1a21fb592f5eeb76accd",
   "main": "src/worker.js",
   "compatibility_date": "2025-05-01",
+  "workers_dev": true,
+  "preview_urls": true,
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  }
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "GAME_ROOM", "class_name": "GameRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GameRoom"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "partyup",
+      "database_id": "f66d30eb-1c81-465b-9b64-bfa2eadf9d3e"
+    }
+  ],
+  "vars": {
+    "WEBAPP_URL": "https://partyup-game.ru",
+    "BOT_USERNAME": "PartyUp_Gamebot"
+  },
+  "routes": [
+    { "pattern": "partyup-game.ru", "custom_domain": true },
+    { "pattern": "www.partyup-game.ru", "custom_domain": true }
+  ]
 }

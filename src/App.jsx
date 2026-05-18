@@ -1,15 +1,97 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Users, Heart, Star, Timer, Eye, Theater, MessageCircle,
   Laugh, Target, Search, Trophy, Settings, Share2, ChevronRight,
   Play, Sparkles, Flame, Moon, Wind, Crown, Check, X, Compass,
-  ShieldCheck, Info, PartyPopper, Rocket, Siren,
+  ShieldCheck, Info, PartyPopper, Rocket, Siren, Lock,
   UserPlus, Copy, ArrowLeft, Home, RotateCcw, Send,
-  CircleCheck, Clock, Brain, Handshake, Dices,
+  CircleCheck, Clock, Brain, Handshake, Dices, Key, Layers,
 } from 'lucide-react'
 import { DURATION_PRESETS, GAMES, PLAYER_PRESETS, VIBES, recommendGames } from './games'
+import { api } from './lib/api.js'
+import { ev, setSessionId, setRoomId as setAnalyticsRoomId } from './lib/analytics.js'
+import { shareToTelegram, miniAppLink, tgUser, shareMessageById, smartShare, isLoggedInTelegram, hapticBurst } from './lib/tg.js'
+import { useUser, displayName, avatarUrl, sanitizeName } from './lib/useUser.js'
 import './theme.css'
 import './App.css'
+
+const BOT_USERNAME = import.meta.env.VITE_BOT_USERNAME || 'PartyUp_Gamebot'
+
+// Лёгкий тост-уведомление поверх UI (для гостей-копий «Скопировано»).
+function flashToast(message) {
+  try {
+    const el = document.createElement('div')
+    el.className = 'pu-toast'
+    el.textContent = message
+    document.body.appendChild(el)
+    requestAnimationFrame(() => el.classList.add('is-in'))
+    setTimeout(() => {
+      el.classList.remove('is-in')
+      setTimeout(() => el.remove(), 280)
+    }, 1800)
+  } catch {}
+}
+
+// Универсальный invite-share. Если юзер залогинен в Telegram (Mini App) —
+// пробуем нативный TG share-композер; всегда копируем ссылку в буфер
+// обмена как страховку и показываем тост-уведомление о результате.
+async function doInviteShare({ deeplink, text, gameId, kind, evName }) {
+  if (evName) ev.share(evName, gameId ? { gameId } : {})
+
+  // 0. Копируем ссылку ВСЕГДА — гарантированный способ поделиться.
+  let copied = false
+  try {
+    await navigator.clipboard.writeText(deeplink)
+    copied = true
+  } catch {}
+
+  const inMiniApp = isLoggedInTelegram()
+  // Залогинен через cookie pu_sess в обычном браузере? Выставлено useUser.
+  const webAuthed = typeof window !== 'undefined' && window.__pu_auth?.mode === 'telegram'
+  const authed = inMiniApp || webAuthed
+  if (authed) {
+    let opened = false
+    if (inMiniApp) {
+      // 1) пытаемся нативный share-пикер Telegram (Bot API 8+, мобильные клиенты)
+      try {
+        const r = await api.prepareShare({ kind: kind || 'invite', text, link: deeplink, gameId })
+        if (r?.preparedMessageId) {
+          opened = shareMessageById(r.preparedMessageId, () => {})
+        }
+      } catch {}
+      // 2) если share-picker не сработал — открываем стандартный share-композер.
+      if (!opened) {
+        try { shareToTelegram(deeplink, text); opened = true } catch {}
+      }
+    } else {
+      // Web-логин через cookie: открываем https://t.me/share/url в новой вкладке —
+      // TG Web/Desktop откроется со стандартным share-композером.
+      const link = `https://t.me/share/url?url=${encodeURIComponent(deeplink)}&text=${encodeURIComponent(text || '')}`
+      try { window.open(link, '_blank', 'noopener'); opened = true } catch {}
+    }
+    flashToast(opened ? '✈️ Открываем Telegram…' : (copied ? '✅ Ссылка скопирована' : 'Не получилось — попробуй ещё раз'))
+    return { mode: opened ? 'tg' : (copied ? 'clipboard' : 'fail') }
+  }
+
+  // Гость: либо native share API (на мобиле), либо clipboard
+  try {
+    if (navigator?.share) {
+      try { await navigator.share({ url: deeplink, text }); return { mode: 'native_share' } } catch {}
+    }
+  } catch {}
+  if (copied) {
+    flashToast('✅ Ссылка скопирована')
+    return { mode: 'clipboard' }
+  }
+  window.prompt('Скопируй ссылку:', deeplink)
+  return { mode: 'prompt' }
+}
+// Числовой bot_id (часть до «:» в токене бота). Нужен Telegram Login Widget'у.
+const TG_BOT_ID = import.meta.env.VITE_TG_BOT_ID || '8904487088'
+// Direct Link Mini App short_name (BotFather → /newapp). С ним ссылки шеринга
+// открывают Mini App мгновенно из любого чата: https://t.me/<bot>/<app>?startapp=...
+const APP_SHORT_NAME = import.meta.env.VITE_APP_SHORT_NAME || 'play'
 
 /* ─── Data Architecture ──────────────────────────────────────────────────── */
 // Entities scaffold — расширяется в будущих версиях
@@ -40,13 +122,42 @@ function createRoom(hostPlayer, game) {
   }
 }
 
-function createRound(game, roundIndex, players) {
-  const prompt = game.samplePrompts[roundIndex % game.samplePrompts.length]
+/* ─── Vibe → content filtering ───────────────────────────────────────────── */
+function filterPromptsByVibe(prompts, vibe) {
+  if (vibe === 'ultra_adult') {
+    const pool = prompts.filter(p => p.vibes?.includes('ultra_adult'))
+    if (pool.length > 0) return pool
+    // fallback на adult, если ультра-набора пока нет
+    const adult = prompts.filter(p => p.vibes?.includes('adult'))
+    return adult.length > 0 ? adult : prompts.filter(p => !p.vibes)
+  }
+  if (vibe === 'adult') {
+    const pool = prompts.filter(p => p.vibes?.includes('adult'))
+    return pool.length > 0 ? pool : prompts.filter(p => !p.vibes)
+  }
+  if (vibe === 'spicy') {
+    return prompts.filter(p => !p.vibes?.some(v => v === 'adult' || v === 'ultra_adult'))
+  }
+  return prompts.filter(p => !p.vibes || p.vibes.includes(vibe))
+}
+
+function createRound(game, roundIndex, players, vibe = 'warmup', dbPool = null) {
+  // dbPool — карточки из БД (если уже подгружены) для (gameId, vibe).
+  // Если их достаточно — используем их, иначе fallback на game.samplePrompts с локальным фильтром.
+  const pool = (dbPool && dbPool.length > 0)
+    ? dbPool
+    : (filterPromptsByVibe(game.samplePrompts, vibe).length > 0
+        ? filterPromptsByVibe(game.samplePrompts, vibe)
+        : game.samplePrompts)
+  const safePool = pool.length > 0 ? pool : game.samplePrompts
+  const prompt = safePool[roundIndex % safePool.length]
   const activePlayer = players[roundIndex % players.length]
   return {
     id: roundIndex,
     promptType: prompt.type,
     promptText: prompt.text,
+    promptData: prompt, // full prompt object for TabooRound, BunkerRound etc.
+    vibe,              // passed through for per-round vibe-aware filtering
     activePlayerId: activePlayer.id,
     reactions: {},
     responses: [],
@@ -57,12 +168,21 @@ function createRound(game, roundIndex, players) {
 
 /* ─── Constants ───────────────────────────────────────────────────────────── */
 const SCREENS = {
-  HOME: 'home', PICKER: 'picker', DETAIL: 'gameDetail',
+  HOME: 'home',
+  GAMES: 'games',
+  CREATE_LOBBY: 'createLobby',
+  FRIENDS: 'friends',
+  PICKER: 'picker', DETAIL: 'gameDetail',
   PLAYER_SETUP: 'playerSetup',
-  LOBBY: 'lobby', ROUND: 'round', RESULTS: 'results', SETTINGS: 'settings',
+  LOBBY: 'lobby', ROUND: 'round', RESULTS: 'results',
+  SETTINGS: 'settings', PROFILE: 'profile',
+  JOIN_ROOM: 'joinRoom',
 }
 
-const EMOJIS = ['😎','✨','🕶️','🎧','🌟','🔥','💫','🎯','🎪','🎲']
+// Bottom nav видна только на табах верхнего уровня; во время игры/настройки игры — скрыта.
+const NAV_TABS = [SCREENS.HOME, SCREENS.GAMES, SCREENS.CREATE_LOBBY, SCREENS.FRIENDS, SCREENS.SETTINGS, SCREENS.PROFILE]
+
+const EMOJIS = ['🦊','✨','🐺','🎧','🌟','🔥','💫','🎯','🎪','🎲']
 
 const GAME_ICONS_MAP = {
   truth: Target, never: ShieldCheck, whoofus: Users, five: Timer,
@@ -78,7 +198,7 @@ function GameIcon({ gameId, size = 22, ...props }) {
 
 const VIBE_ICONS_MAP = {
   warmup: Wind, funny: Laugh, spicy: Flame, chill: Moon,
-  new_people: Handshake, deep: Heart,
+  new_people: Handshake, deep: Heart, adult: Lock,
 }
 function VibeIcon({ vibeId, size = 18, ...props }) {
   const Icon = VIBE_ICONS_MAP[vibeId] || Sparkles
@@ -110,18 +230,140 @@ export default function App() {
   const [screen, setScreen] = useState(SCREENS.HOME)
   const [history, setHistory] = useState([])
   const [selectedGameId, setSelectedGameId] = useState('whoofus')
-  const [picker, setPicker] = useState({ players: 'medium', vibe: 'warmup', duration: 'medium' })
+  const [pickerRaw, setPickerRaw] = useState(() => {
+    try { const s = sessionStorage.getItem('pu_picker'); return s ? JSON.parse(s) : { players: 'medium', vibe: 'warmup', duration: 'medium' } } catch { return { players: 'medium', vibe: 'warmup', duration: 'medium' } }
+  })
+  // Burst-эффект при выборе вайба. burstEvent хранит id + origin (координаты кнопки).
+  const [vibeBurstEvent, setVibeBurstEvent] = useState({ id: 0, x: null, y: null })
+  const burstFromEvent = useCallback((evt) => {
+    let x = null, y = null
+    try {
+      const el = evt?.currentTarget || evt?.target
+      const wrap = el?.closest?.('.vibe-scroll') || el
+      if (wrap?.getBoundingClientRect) {
+        const r = wrap.getBoundingClientRect()
+        x = r.left + r.width / 2
+        y = r.top + r.height / 2
+      }
+    } catch {}
+    // Серия импактов синхронно с разлётом эмодзи — Taptic Engine «взрыв».
+    hapticBurst('normal')
+    setVibeBurstEvent(b => ({ id: b.id + 1, x, y }))
+  }, [])
+  const picker = pickerRaw
+  const setPicker = useCallback((update) => {
+    setPickerRaw(prev => typeof update === 'function' ? update(prev) : update)
+  }, [])
   const [room, setRoom] = useState(null)
   const [roundIndex, setRoundIndex] = useState(0)
+  // Серверный per-round-state для мультиплеера: { choice, promptText, promptType, pickedBy }
+  // Поллинг RoundScreen обновляет его, компоненты раундов читают для отрисовки.
+  const [roomRoundState, setRoomRoundState] = useState(null)
+  // Флаг: профиль открыт из игры? Если да — показываем «Вернуться в игру».
+  const [profileFromGame, setProfileFromGame] = useState(false)
+  // Краткая карточка чужого игрока (когда у него нет TG username и это не «я»).
+  const [viewedPlayer, setViewedPlayer] = useState(null)
+
+  // Замеряем РЕАЛЬНУЮ высоту BottomNav и прокидываем в --bnav-h. Хардкод 64px
+  // ломался на iOS (safe-area-bottom добавляет +20–34px), поэтому фиксированные
+  // элементы (sticky-кнопка «Играть») вылезали на меню.
+  useEffect(() => {
+    const root = document.documentElement
+    const measure = () => {
+      const nav = document.querySelector('.bottom-nav')
+      if (!nav) return
+      const h = nav.getBoundingClientRect().height
+      if (h > 0) root.style.setProperty('--bnav-h', `${Math.round(h)}px`)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    const nav = document.querySelector('.bottom-nav')
+    if (nav) ro.observe(nav)
+    window.addEventListener('resize', measure)
+    window.addEventListener('orientationchange', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('orientationchange', measure)
+    }
+  }, [])
   const [reaction, setReaction] = useState(null)
   const [shared, setShared] = useState(false)
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('partyup_welcomed'))
   const [showWarmupHint, setShowWarmupHint] = useState(false)
   const [settings, setSettings] = useState({ mode: 'Один телефон', rounds: 6, privacy: 'По ссылке' })
-  const [playerNames, setPlayerNames] = useState(['Вы', 'Игрок 2', 'Игрок 3'])
-  const [gameMode, setGameMode] = useState('one_phone')
+  const [playerNames, setPlayerNames] = useState(() => {
+    try { const s = sessionStorage.getItem('pu_names'); return s ? JSON.parse(s) : ['Вы', 'Игрок 2', 'Игрок 3'] } catch { return ['Вы', 'Игрок 2', 'Игрок 3'] }
+  })
+  const [gameMode, setGameMode] = useState(() => {
+    try { return sessionStorage.getItem('pu_mode') || 'one_phone' } catch { return 'one_phone' }
+  })
+  const [scores, setScores] = useState({}) // { playerId: number } — накапливается за сессию
+  const [sessionDbId, setSessionDbId] = useState(null) // id записи в sessions для аналитики
+  const [pendingMode, setPendingMode] = useState(null) // нав. подсказка для PlayerSetup (multiplayer из «Создать лобби»)
+  // Кэш карточек из БД: { 'truth|adult' : [{type,text,vibes,intensity,meta}, …] }
+  const [cardsCache, setCardsCache] = useState({})
+
+  // Multiplayer state
+  const [roomId, setRoomId] = useState(null)
+  const [isMultiplayer, setIsMultiplayer] = useState(false)
+  const [isHost, setIsHost] = useState(false)
+  const auth = useUser()
+  // myPlayerId: предпочитаем tg_id (стабильный), иначе random.
+  // Когда auth подгрузится — апдейтим myPlayerId, чтобы в multiplayer быть тем же юзером.
+  const [myPlayerId, setMyPlayerId] = useState(() => `p_${Math.random().toString(36).slice(2, 8)}`)
+  useEffect(() => {
+    if (auth.tgUser?.id) setMyPlayerId(`tg_${auth.tgUser.id}`)
+  }, [auth.tgUser?.id])
+
+  const recordRoundScore = useCallback((roundScores) => {
+    setScores(s => {
+      const next = { ...s }
+      for (const [id, pts] of Object.entries(roundScores)) {
+        next[id] = (next[id] || 0) + pts
+      }
+      return next
+    })
+  }, [])
+
+  // Накапливаем активное время игрока (мс на собственных ходах) в локальной игре.
+  // В multiplayer аналогичные значения копит DurableObject и присылает в players.
+  const recordActiveMs = useCallback((playerId, ms) => {
+    if (!playerId || !ms) return
+    setRoom(r => {
+      if (!r) return r
+      return {
+        ...r,
+        players: r.players.map(p =>
+          p.id === playerId ? { ...p, activeMs: (p.activeMs || 0) + Math.max(0, Number(ms) || 0) } : p
+        ),
+      }
+    })
+  }, [])
 
   const selectedGame = useMemo(() => GAMES.find(g => g.id === selectedGameId) || GAMES[0], [selectedGameId])
+
+  // Подтягиваем карточки из БД (gameId × vibe). Один раз на ключ, кэшируем.
+  useEffect(() => {
+    if (!selectedGame?.id) return
+    const key = `${selectedGame.id}|${picker.vibe || ''}`
+    if (cardsCache[key]) return
+    fetch(`/api/cards?game_id=${encodeURIComponent(selectedGame.id)}&vibe=${encodeURIComponent(picker.vibe || '')}&limit=500`)
+      .then(r => r.json())
+      .then(r => {
+        const rows = Array.isArray(r?.rows) ? r.rows : []
+        // Адаптация под формат samplePrompts (text, type, + forbidden/meta).
+        const prompts = rows.map(row => ({
+          type: row.type,
+          text: row.text,
+          vibes: row.vibes,
+          intensity: row.intensity,
+          ...(row.meta && typeof row.meta === 'object' ? row.meta : {}),
+        }))
+        setCardsCache(c => ({ ...c, [key]: prompts }))
+      })
+      .catch(() => {})
+  }, [selectedGame?.id, picker.vibe]) // eslint-disable-line react-hooks/exhaustive-deps
   const recommendations = useMemo(() => recommendGames(picker), [picker])
   const players = room?.players || [
     createPlayer({ id: 'host', name: 'Вы', emoji: '😎', ready: true, isHost: true }),
@@ -130,7 +372,11 @@ export default function App() {
     createPlayer({ id: 'sasha', name: 'Саша', emoji: '🎧', ready: true }),
   ]
   const everyoneReady = players.every(p => p.ready)
-  const currentRound = useMemo(() => createRound(selectedGame, roundIndex, players), [selectedGame, roundIndex, players])
+  const totalRounds = settings.rounds  // e.g. 3,5,6,10 — NOT prompt array length
+  const currentRound = useMemo(
+    () => createRound(selectedGame, roundIndex, players, picker.vibe, cardsCache[`${selectedGame?.id}|${picker.vibe || ''}`] || null),
+    [selectedGame, roundIndex, players, picker.vibe, cardsCache]
+  )
 
   const navigate = useCallback((next, gameId) => {
     if (gameId) setSelectedGameId(gameId)
@@ -142,14 +388,58 @@ export default function App() {
       setScreen(prev || SCREENS.HOME); return next
     })
   }, [])
-  const goHome = useCallback(() => { setHistory([]); setScreen(SCREENS.HOME) }, [])
+
+  // Закрытие текущей сессии/комнаты при выходе пользователя из игрового экрана.
+  // Не дёргает DO ради экономии, кроме случая host-multiplayer (один запрос на
+  // правомерное завершение). Локальные сессии закрываются только в D1.
+  const closeActiveGameQuiet = useCallback(() => {
+    try {
+      if (sessionDbId) {
+        // sendBeacon выживает unload/navigate. Сессия помечается finished в D1.
+        const body = new Blob([JSON.stringify({
+          id: sessionDbId, roundsPlayed: roundIndex + 1, abandoned: true,
+        })], { type: 'application/json' })
+        navigator.sendBeacon?.('/api/session/finish', body)
+      }
+      if (isMultiplayer && isHost && roomId) {
+        // Один DO-запрос на корректное закрытие. Без этого комната висит до
+        // server-side sweep (30 мин). sendBeacon — fire-and-forget.
+        const body = new Blob([JSON.stringify({ state: 'ended' })], { type: 'application/json' })
+        navigator.sendBeacon?.(`/api/room/${roomId}/action`, body)
+      }
+    } catch {}
+  }, [sessionDbId, roundIndex, isMultiplayer, isHost, roomId])
+
+  const goHome = useCallback(() => {
+    // Если уходим со «внутренних» экранов игры — закрываем сессию/комнату.
+    if ([SCREENS.LOBBY, SCREENS.ROUND, SCREENS.PLAYER_SETUP].includes(screen)) {
+      closeActiveGameQuiet()
+      setSessionDbId(null)
+    }
+    setHistory([]); setScreen(SCREENS.HOME)
+  }, [screen, closeActiveGameQuiet])
+
+  // Глобальный safety-net: при закрытии вкладки / сворачивании Mini App
+  // закрываем активную сессию через sendBeacon (он переживёт unload).
+  useEffect(() => {
+    const onHide = () => {
+      if ([SCREENS.LOBBY, SCREENS.ROUND].includes(screen)) closeActiveGameQuiet()
+    }
+    window.addEventListener('pagehide', onHide)
+    return () => window.removeEventListener('pagehide', onHide)
+  }, [screen, closeActiveGameQuiet])
 
   const haptic = useCallback((type = 'selection') => {
     try {
+      // Юзер выключил вибрацию в настройках — silently no-op.
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('pu_haptics') === 'off') return
       const tg = window.Telegram?.WebApp
       if (!tg?.HapticFeedback) return
       if (type === 'success') tg.HapticFeedback.notificationOccurred('success')
+      else if (type === 'error') tg.HapticFeedback.notificationOccurred('error')
+      else if (type === 'warning') tg.HapticFeedback.notificationOccurred('warning')
       else if (type === 'impact') tg.HapticFeedback.impactOccurred('light')
+      else if (type === 'impact_medium') tg.HapticFeedback.impactOccurred('medium')
       else tg.HapticFeedback.selectionChanged()
     } catch {}
   }, [])
@@ -159,34 +449,158 @@ export default function App() {
     setShowWelcome(false)
   }, [])
 
-  const openGame = useCallback((gameId) => { haptic(); navigate(SCREENS.DETAIL, gameId) }, [haptic, navigate])
+  const openGame = useCallback((gameId) => { haptic(); ev.gameSelect(gameId); navigate(SCREENS.DETAIL, gameId) }, [haptic, navigate])
 
-  const createLobby = useCallback((names, mode) => {
+  const createLobby = useCallback(async (names, mode, gameOverride) => {
     if (picker.vibe === 'warmup') setShowWarmupHint(true)
     else setShowWarmupHint(false)
+
+    // Можно передать игру явно (CreateLobbyScreen знает выбор раньше, чем setState отработает).
+    const game = gameOverride || selectedGame
+
+    if (mode === 'multiplayer') {
+      // Multiplayer: create room on server, only host player
+      const newRoomId = Math.random().toString(36).slice(2, 8).toUpperCase()
+      const tgU = tgUser()
+      const hostId = tgU?.id || myPlayerId
+      const hostPlayer = createPlayer({
+        id: myPlayerId,
+        name: names[0],
+        emoji: EMOJIS[0],
+        ready: true,
+        isHost: true,
+        telegramId: tgU?.id || null,
+        photo_url: tgU?.photo_url || null,
+        username: tgU?.username || null,
+      })
+      const initPayload = {
+        id: newRoomId,
+        hostId,
+        gameId: game.id,
+        settings: { rounds: settings.rounds, vibe: picker.vibe },
+        players: [{
+          id: hostPlayer.id, name: hostPlayer.name, emoji: hostPlayer.emoji,
+          userId: tgU?.id || null, telegramId: tgU?.id || null,
+          photo_url: tgU?.photo_url || null, username: tgU?.username || null,
+        }],
+      }
+      try {
+        const serverRoom = await api.roomInit(newRoomId, initPayload)
+        ev.roomCreate(game.id)
+        setAnalyticsRoomId(newRoomId)
+        const newRoom = createRoom(hostPlayer, game)
+        newRoom.id = newRoomId
+        newRoom.players = [hostPlayer]
+        newRoom.settings = { ...newRoom.settings, mode: 'Мультиплеер', vibe: picker.vibe }
+        setRoom(newRoom)
+        setRoomId(newRoomId)
+        setIsMultiplayer(true)
+        setIsHost(true)
+        setRoundIndex(serverRoom.roundIndex || 0)
+        setReaction(null)
+        // регистрируем сессию в БД
+        try {
+          const r = await api.startSession({
+            gameId: game.id, vibe: picker.vibe, mode: 'multiplayer',
+            playersCount: 1, roundsTotal: settings.rounds, roomId: newRoomId,
+            players: [{ id: hostPlayer.id, name: hostPlayer.name, emoji: hostPlayer.emoji, userId: tgU?.id || null }],
+          })
+          if (r?.sessionId) { setSessionDbId(r.sessionId); setSessionId(r.sessionId) }
+        } catch {}
+        ev.gameStart(game.id, { mode: 'multiplayer', vibe: picker.vibe, rounds: settings.rounds })
+        haptic('impact')
+        navigate(SCREENS.LOBBY)
+      } catch (e) {
+        console.error('Failed to create room', e)
+        haptic('error')
+      }
+      return
+    }
+
+    // Local mode (one_phone) — единственный локальный режим, сразу в раунд без LOBBY.
+    // Хосту (i===0) проставляем telegramId, чтобы аватарка подгружалась корректно.
+    const tgU = tgUser()
     const playersList = names.map((name, i) =>
-      createPlayer({ id: `p${i}`, name, emoji: EMOJIS[i % EMOJIS.length], ready: true, isHost: i === 0 })
+      createPlayer({
+        id: `p${i}`, name, emoji: EMOJIS[i % EMOJIS.length],
+        ready: true, isHost: i === 0,
+        telegramId: i === 0 ? (tgU?.id || null) : null,
+      })
     )
-    const newRoom = createRoom(playersList[0], selectedGame)
+    const newRoom = createRoom(playersList[0], game)
     newRoom.players = playersList
-    newRoom.settings = { ...newRoom.settings, mode: mode === 'one_phone' ? 'Один телефон' : mode === 'all_see' ? 'Все видят экран' : 'Мультиплеер', vibe: picker.vibe }
+    newRoom.settings = { ...newRoom.settings, mode: 'Один телефон', vibe: picker.vibe }
     setRoom(newRoom); setRoundIndex(0); setReaction(null)
-    haptic('impact'); navigate(SCREENS.LOBBY)
-  }, [haptic, navigate, picker, selectedGame])
+    setIsMultiplayer(false); setIsHost(false)
+    try {
+      const r = await api.startSession({
+        gameId: game.id, vibe: picker.vibe, mode,
+        playersCount: playersList.length, roundsTotal: settings.rounds,
+        players: playersList.map(p => ({ id: p.id, name: p.name, emoji: p.emoji })),
+      })
+      if (r?.sessionId) { setSessionDbId(r.sessionId); setSessionId(r.sessionId) }
+    } catch {}
+    ev.gameStart(game.id, { mode, vibe: picker.vibe, players: playersList.length, rounds: settings.rounds })
+    haptic('impact')
+    // PlayerSetup — последний экран перед игрой. LOBBY с готовностями убран.
+    navigate(SCREENS.ROUND)
+  }, [haptic, navigate, picker, selectedGame, settings, myPlayerId])
 
   const startRound = useCallback(() => {
     setShowWarmupHint(false); setReaction(null)
     haptic('success'); navigate(SCREENS.ROUND)
   }, [haptic, navigate])
 
-  const nextRound = useCallback(() => {
-    if (roundIndex >= selectedGame.samplePrompts.length - 1) { haptic('success'); navigate(SCREENS.RESULTS); return }
-    setRoundIndex(i => i + 1); setReaction(null); haptic('impact')
-  }, [haptic, navigate, roundIndex, selectedGame])
+  const finishSessionRemote = useCallback(async (roundsPlayed) => {
+    if (!sessionDbId) return
+    try {
+      const winnerEntry = Object.entries(scores).sort((a, b) => b[1] - a[1])[0]
+      const totalScore = Object.values(scores).reduce((s, v) => s + (v || 0), 0)
+      // Активное время каждого игрока — из player.activeMs (multiplayer обновляет
+      // через server, локально считаем сами в раунде). Конвертируем ms → ms.
+      const activeTimes = {}
+      for (const p of players) {
+        if (p?.id && typeof p.activeMs === 'number') activeTimes[p.id] = p.activeMs
+      }
+      await api.finishSession({
+        id: sessionDbId, roundsPlayed, scores,
+        activeTimes,
+        winnerUserId: winnerEntry ? (players.find(p => p.id === winnerEntry[0])?.telegramId || null) : null,
+        totalScore,
+      })
+    } catch {}
+  }, [sessionDbId, scores, players])
+
+  const nextRound = useCallback(async () => {
+    if (roundIndex >= totalRounds - 1) {
+      haptic('success')
+      ev.gameFinish(selectedGame.id, { vibe: picker.vibe, rounds: totalRounds, completed: true })
+      finishSessionRemote(totalRounds)
+      if (isMultiplayer && isHost && roomId) {
+        try { await api.roomAction(roomId, { state: 'ended' }) }
+        catch (e) { console.error('Failed to end room', e) }
+      }
+      navigate(SCREENS.RESULTS)
+      return
+    }
+    const nextIdx = roundIndex + 1
+    ev.roundEnd(selectedGame.id, roundIndex)
+    ev.roundStart(selectedGame.id, nextIdx)
+    // Любой клиент, у которого активный ход, продвигает раунд — не только хост.
+    // Сервер сам обнулит round при смене roundIndex.
+    if (isMultiplayer && roomId) {
+      try { await api.roomAction(roomId, { roundIndex: nextIdx }) }
+      catch (e) { console.error('Failed to advance round', e) }
+    }
+    setRoundIndex(nextIdx); setReaction(null); setRoomRoundState(null); haptic('impact')
+  }, [haptic, navigate, roundIndex, totalRounds, isMultiplayer, isHost, roomId, selectedGame, picker.vibe, finishSessionRemote])
 
   const endGame = useCallback(() => {
-    haptic('success'); navigate(SCREENS.RESULTS)
-  }, [haptic, navigate])
+    haptic('success')
+    ev.gameFinish(selectedGame.id, { vibe: picker.vibe, rounds: roundIndex + 1, completed: false })
+    finishSessionRemote(roundIndex + 1)
+    navigate(SCREENS.RESULTS)
+  }, [haptic, navigate, selectedGame, picker.vibe, roundIndex, finishSessionRemote])
 
   const togglePlayerReady = useCallback((playerId) => {
     setRoom(r => r ? ({
@@ -200,17 +614,95 @@ export default function App() {
     setRoom(r => r ? ({ ...r, players: r.players.map(p => ({...p, ready: true})) }) : r)
   }, [])
 
+  // Persist session state
+  useEffect(() => { try { sessionStorage.setItem('pu_picker', JSON.stringify(picker)) } catch {} }, [picker])
+  useEffect(() => { try { sessionStorage.setItem('pu_names', JSON.stringify(playerNames)) } catch {} }, [playerNames])
+  useEffect(() => { try { sessionStorage.setItem('pu_mode', gameMode) } catch {} }, [gameMode])
+
+  // Determine join target on load:
+  // 1) ?room=XXX (web fallback)
+  // 2) Telegram start_param: "room_XXXXXX" (из t.me/<bot>/<app>?startapp=room_XXX) или просто "XXXXXX"
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    let joinRoomId = params.get('room')
+    const sp = window.Telegram?.WebApp?.initDataUnsafe?.start_param
+    if (!joinRoomId && sp) {
+      if (sp.startsWith('room_') || sp.startsWith('room-')) joinRoomId = sp.slice(5)
+      else if (/^[A-Z0-9]{6}$/i.test(sp)) joinRoomId = sp
+    }
+    if (joinRoomId) {
+      setRoomId(joinRoomId.toUpperCase())
+      setScreen(SCREENS.JOIN_ROOM)
+      ev.roomJoin(joinRoomId.toUpperCase())
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Telegram adapter
   useEffect(() => {
     const tg = window.Telegram?.WebApp
     if (!tg) return
-    tg.ready(); tg.expand()
+    tg.ready()
+    tg.expand()  // expanded-режим (≈85% экрана) — поддержан везде, кроме старых клиентов
+
+    const root = document.documentElement
+
+    // Прокидываем safe-area из Telegram WebApp в CSS-переменные.
+    // tg.safeAreaInset — system (Dynamic Island / status bar)
+    // tg.contentSafeAreaInset — TG UI элементы (close-кнопка в fullscreen, шапка)
+    const applyInsets = () => {
+      const sa = tg.safeAreaInset || { top: 0, right: 0, bottom: 0, left: 0 }
+      const ca = tg.contentSafeAreaInset || { top: 0, right: 0, bottom: 0, left: 0 }
+      root.style.setProperty('--tg-safe-top', `${sa.top || 0}px`)
+      root.style.setProperty('--tg-safe-right', `${sa.right || 0}px`)
+      root.style.setProperty('--tg-safe-bottom', `${sa.bottom || 0}px`)
+      root.style.setProperty('--tg-safe-left', `${sa.left || 0}px`)
+      root.style.setProperty('--tg-content-top', `${ca.top || 0}px`)
+      root.style.setProperty('--tg-content-right', `${ca.right || 0}px`)
+      root.style.setProperty('--tg-content-bottom', `${ca.bottom || 0}px`)
+      root.style.setProperty('--tg-content-left', `${ca.left || 0}px`)
+      // Контент должен лежать ниже элементов Telegram (close-кнопка, fullscreen-кнопка,
+      // Dynamic Island). Складываем оба отступа, но кладём минимум 12px чтобы было
+      // что-то и в обычном expanded-режиме.
+      const topPad = Math.max(12, (sa.top || 0) + (ca.top || 0))
+      root.style.setProperty('--tg-top-pad', `${topPad}px`)
+    }
+    const applyFullscreen = () => {
+      root.classList.toggle('tg-fullscreen', !!tg.isFullscreen)
+    }
+
     try {
-      tg.setHeaderColor?.('secondary_bg_color')
-      const root = document.documentElement
-      const t = tg.themeParams || {}
-      Object.entries(t).forEach(([k,v]) => { if(v) root.style.setProperty(`--tg-theme-${k.replaceAll('_','-')}`, v) })
+      root.classList.add('tg-app')
+      applyInsets()
+      applyFullscreen()
+
+      // Полноэкранный режим (Bot API 8.0+) — только мобильные клиенты.
+      // У Mini App три viewport-режима:
+      //   1) compact     — нижняя половина (по умолчанию при открытии)
+      //   2) expanded    — почти весь экран, TG-шапка сверху видна (tg.expand)
+      //   3) fullscreen  — на весь экран, без TG UI (tg.requestFullscreen)
+      tg.requestFullscreen?.()
+      tg.disableVerticalSwipes?.()
+      tg.onEvent?.('fullscreenChanged', applyFullscreen)
+      tg.onEvent?.('safeAreaChanged', applyInsets)
+      tg.onEvent?.('contentSafeAreaChanged', applyInsets)
+      tg.onEvent?.('viewportChanged', applyInsets)
+
+      // Force our dark header — don't use TG theme bg (can be light)
+      tg.setHeaderColor?.('#100f1a')
+      tg.setBackgroundColor?.('#0c0b15')
+      // Explicitly lock dark mode for our design
+      root.style.setProperty('--tg-theme-bg-color', '#100f1a')
+      root.style.setProperty('--tg-theme-secondary-bg-color', '#1c1929')
     } catch {}
+
+    return () => {
+      try {
+        tg.offEvent?.('fullscreenChanged', applyFullscreen)
+        tg.offEvent?.('safeAreaChanged', applyInsets)
+        tg.offEvent?.('contentSafeAreaChanged', applyInsets)
+        tg.offEvent?.('viewportChanged', applyInsets)
+      } catch {}
+    }
   }, [])
 
   useEffect(() => {
@@ -237,30 +729,76 @@ export default function App() {
         </div>
       )}
 
+      <VibeBurst vibe={picker.vibe} burst={vibeBurstEvent}/>
+
       <header className="app-header" role="banner">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true"><Dices size={26} color="white"/></div>
+        <button className="brand brand-btn" onClick={goHome} aria-label="На главную">
+          <div className="brand-mark" aria-hidden="true"><img src="/logo.png" alt="" className="brand-logo-img"/></div>
           <div className="brand-text">
             <div className="brand-name">PartyUp</div>
             <div className="brand-sub">Игры для весёлой компании</div>
           </div>
-        </div>
+        </button>
         <div className="header-actions">
-          {screen !== SCREENS.HOME && (
-            <button className="icon-btn" onClick={goHome} aria-label="На главную">
-              <Home size={18}/>
+          {screen === SCREENS.PROFILE ? (
+            <button
+              className="icon-btn user-chip"
+              onClick={goBack}
+              aria-label="Закрыть профиль"
+            >
+              <X size={18}/>
+            </button>
+          ) : (
+            <button
+              className="icon-btn user-chip"
+              onClick={() => navigate(SCREENS.PROFILE)}
+              aria-label={auth.tgUser ? `Профиль ${displayName(auth)}` : 'Профиль'}
+            >
+              {avatarUrl(auth) ? (
+                <img src={avatarUrl(auth)} alt="" className="user-chip-avatar" referrerPolicy="no-referrer"/>
+              ) : auth.tgUser ? (
+                <span className="user-chip-initials">
+                  {(auth.tgUser.first_name || auth.tgUser.username || '?').slice(0, 1).toUpperCase()}
+                </span>
+              ) : (
+                <span className="user-chip-initials" style={{background:'linear-gradient(135deg,#555,#333)'}}>?</span>
+              )}
             </button>
           )}
-          <button className="icon-btn" onClick={() => navigate(SCREENS.SETTINGS)} aria-label="Настройки">
-            <Settings size={18}/>
-          </button>
         </div>
       </header>
 
       <main className="screen-frame" key={screen}>
         {screen === SCREENS.HOME &&
           <HomeScreen picker={picker} setPicker={setPicker}
-            onPicker={() => navigate(SCREENS.PICKER)} onGame={openGame} />}
+            onPicker={() => navigate(SCREENS.PICKER)} onGame={openGame}
+            onAllGames={() => navigate(SCREENS.GAMES)}
+            onBurst={burstFromEvent} />}
+        {screen === SCREENS.GAMES &&
+          <GamesScreen picker={picker} setPicker={setPicker} onGame={openGame} onBurst={burstFromEvent} />}
+        {screen === SCREENS.CREATE_LOBBY &&
+          <CreateLobbyScreen
+            picker={picker} setPicker={setPicker}
+            settings={settings} setSettings={setSettings}
+            myName={displayName(auth, null)}
+            onBurst={burstFromEvent}
+            onCreate={(gameId) => {
+              setSelectedGameId(gameId)
+              const game = GAMES.find(g => g.id === gameId) || GAMES[0]
+              // Имя хоста: реальное TG-имя / ник сессии / последнее сохранённое.
+              const myName = displayName(auth, null) ||
+                (typeof localStorage !== 'undefined' && localStorage.getItem('pu_my_name')) ||
+                'Хост'
+              createLobby([myName], 'multiplayer', game)
+            }}
+            onEnterRoom={(code) => {
+              setRoomId(code.toUpperCase())
+              navigate(SCREENS.JOIN_ROOM)
+            }}
+            haptic={haptic}
+          />}
+        {screen === SCREENS.FRIENDS &&
+          <FriendsScreen />}
         {screen === SCREENS.PICKER &&
           <PickerScreen picker={picker} setPicker={setPicker} recommendations={recommendations} onSelect={openGame} />}
         {screen === SCREENS.DETAIL &&
@@ -268,31 +806,384 @@ export default function App() {
         {screen === SCREENS.PLAYER_SETUP &&
           <PlayerSetupScreen
             game={selectedGame}
-            onStart={(names, mode) => { setPlayerNames(names); setGameMode(mode); createLobby(names, mode) }}
-            onBack={goBack}
+            myName={displayName(auth, null)}
+            initialMode={pendingMode}
+            settings={settings}
+            setSettings={setSettings}
+            auth={auth}
+            onAvatarClick={() => navigate(SCREENS.PROFILE)}
+            onStart={(names, mode) => {
+              setPendingMode(null)
+              setPlayerNames(names); setGameMode(mode); createLobby(names, mode)
+            }}
+            onBack={() => { setPendingMode(null); goBack() }}
           />}
         {screen === SCREENS.LOBBY &&
           <LobbyScreen game={selectedGame} players={players} room={room}
+            myId={myPlayerId}
             settings={settings} setSettings={setSettings}
             showWarmupHint={showWarmupHint} onDismissHint={() => setShowWarmupHint(false)}
             onStart={startRound} everyoneReady={everyoneReady}
             onToggleReady={togglePlayerReady} onAllReady={setAllReady}
             onSettings={() => navigate(SCREENS.SETTINGS)}
-            currentVibe={picker.vibe} onChangeVibe={v => setPicker(p => ({...p, vibe:v}))} />}
+            currentVibe={picker.vibe} onChangeVibe={v => setPicker(p => ({...p, vibe:v}))}
+            haptic={haptic}
+            isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
+            onRoomPlayersUpdate={(updatedPlayers) => setRoom(r => r ? { ...r, players: updatedPlayers } : r)}
+            onGameStartedByHost={() => { startRound() }}
+            auth={auth}
+            onPlayerAvatarClick={(p) => {
+              const myTg = auth?.tgUser?.id
+              const isSelf = myTg != null && p?.telegramId != null && Number(p.telegramId) === Number(myTg)
+              if (isSelf) {
+                setProfileFromGame(true)
+                navigate(SCREENS.PROFILE); return
+              }
+              const username = p?.username || p?.tg_username
+              if (username) {
+                const tg = window.Telegram?.WebApp
+                const link = `https://t.me/${username}`
+                if (tg?.openTelegramLink) tg.openTelegramLink(link)
+                else window.open(link, '_blank')
+              } else {
+                setViewedPlayer(p)
+              }
+            }}
+          />}
         {screen === SCREENS.ROUND &&
           <RoundScreen game={selectedGame} round={currentRound}
-            roundIndex={roundIndex} total={selectedGame.samplePrompts.length}
-            players={players}
-            onNext={nextRound} onEnd={endGame} haptic={haptic} />}
+            myId={myPlayerId}
+            roundIndex={roundIndex} total={totalRounds}
+            players={players} scores={scores} recordRoundScore={recordRoundScore}
+            recordActiveMs={recordActiveMs}
+            onNext={nextRound} onEnd={endGame} haptic={haptic}
+            isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
+            onRoundSync={(idx) => { setRoundIndex(idx); setRoomRoundState(null) }}
+            onRoundStateSync={(rs) => setRoomRoundState(prev => {
+              // Dedupe: тот же выбор + та же карточка → не триггерим re-render.
+              const a = prev ? `${prev.choice}|${prev.pickedAt}` : 'null'
+              const b = rs ? `${rs.choice}|${rs.pickedAt}` : 'null'
+              return a === b ? prev : rs
+            })}
+            roomRoundState={roomRoundState}
+            onGameEnded={() => { navigate(SCREENS.RESULTS) }}
+            auth={auth}
+            onAvatarClick={(p) => {
+              // Свой — открываем свой профиль; чужой с username — TG-чат.
+              const myTg = auth?.tgUser?.id
+              const isSelf = myTg != null && p?.telegramId != null && Number(p.telegramId) === Number(myTg)
+              if (isSelf) {
+                setProfileFromGame(true)
+                navigate(SCREENS.PROFILE); return
+              }
+              const username = p?.username || p?.tg_username
+              if (username) {
+                const tg = window.Telegram?.WebApp
+                const link = `https://t.me/${username}`
+                if (tg?.openTelegramLink) tg.openTelegramLink(link)
+                else window.open(link, '_blank')
+              } else {
+                setViewedPlayer(p)
+              }
+            }}
+          />}
         {screen === SCREENS.RESULTS &&
           <ResultsScreen game={selectedGame} players={players}
-            shared={shared} setShared={setShared}
-            onAgain={() => { setRoundIndex(0); navigate(SCREENS.ROUND) }} onHome={goHome} />}
+            scores={scores}
+            onAgain={async () => {
+              setRoundIndex(0); setScores({}); setRoomRoundState(null); setSessionDbId(null)
+              // Регистрируем НОВУЮ сессию в БД — чтобы аналитика считала это отдельной партией.
+              try {
+                const r = await api.startSession({
+                  gameId: selectedGame.id, vibe: picker.vibe,
+                  mode: isMultiplayer ? 'multiplayer' : 'one_phone',
+                  playersCount: players.length, roundsTotal: settings.rounds,
+                  roomId: isMultiplayer ? roomId : null,
+                  players: players.map(p => ({ id: p.id, name: p.name, emoji: p.emoji, userId: p.telegramId || null })),
+                })
+                if (r?.sessionId) { setSessionDbId(r.sessionId); setSessionId(r.sessionId) }
+              } catch {}
+              ev.gameStart(selectedGame.id, { mode: isMultiplayer ? 'multiplayer' : 'one_phone', vibe: picker.vibe, again: true })
+              // В multiplayer комнату не пересоздаём — только сбрасываем round-state на сервере.
+              if (isMultiplayer && roomId) {
+                try { await api.roomAction(roomId, { roundIndex: 0, round: null, state: 'playing' }) } catch {}
+              }
+              navigate(SCREENS.ROUND)
+            }}
+            onHome={goHome} />}
         {screen === SCREENS.SETTINGS &&
           <SettingsScreen settings={settings} setSettings={setSettings} onBack={goBack} />}
+        {screen === SCREENS.PROFILE &&
+          <ProfileScreen auth={auth} onBack={goBack}
+            onReturnToGame={profileFromGame ? () => {
+              setProfileFromGame(false)
+              setScreen(SCREENS.ROUND)
+            } : null}
+          />}
+        {screen === SCREENS.JOIN_ROOM &&
+          <JoinRoomScreen
+            roomId={roomId}
+            myPlayerId={myPlayerId}
+            defaultName={displayName(auth, null)}
+            onJoined={(joinedRoom, playerName) => {
+              const mePlayer = createPlayer({ id: myPlayerId, name: playerName, emoji: EMOJIS[1], ready: true, isHost: false })
+              const hostPlayer = joinedRoom.players.find(p => p.id === joinedRoom.hostId)
+              const allPlayers = joinedRoom.players.map(p =>
+                createPlayer({ id: p.id, name: p.name, emoji: p.emoji || EMOJIS[0], ready: true, isHost: p.id === joinedRoom.hostId })
+              )
+              const gameObj = GAMES.find(g => g.id === joinedRoom.gameId) || GAMES[0]
+              setSelectedGameId(gameObj.id)
+              const newRoom = createRoom(hostPlayer ? createPlayer({ id: hostPlayer.id, name: hostPlayer.name, emoji: hostPlayer.emoji || EMOJIS[0], isHost: true }) : mePlayer, gameObj)
+              newRoom.id = joinedRoom.id
+              newRoom.players = allPlayers
+              newRoom.settings = { ...newRoom.settings, mode: 'Мультиплеер', vibe: joinedRoom.settings?.vibe || 'warmup' }
+              setRoom(newRoom)
+              setRoomId(joinedRoom.id)
+              setIsMultiplayer(true)
+              setIsHost(false)
+              setRoundIndex(joinedRoom.roundIndex || 0)
+              setPicker(p => ({ ...p, vibe: joinedRoom.settings?.vibe || 'warmup' }))
+              setSettings(s => ({ ...s, rounds: joinedRoom.settings?.rounds || 6 }))
+              haptic('success')
+              navigate(SCREENS.LOBBY)
+            }}
+            onBack={goHome}
+            haptic={haptic}
+          />}
       </main>
 
+      {/* BottomNav статичный — виден на всех экранах */}
+      <BottomNav screen={screen} onNavigate={(s) => { haptic(); navigate(s) }} />
+
+
       {showWelcome && <WelcomeModal onClose={dismissWelcome} />}
+      {viewedPlayer && <ViewedPlayerModal player={viewedPlayer} onClose={() => setViewedPlayer(null)} />}
+    </div>
+  )
+}
+
+/* ─── GameLobbySettings — динамические настройки в зависимости от игры ──── */
+// Каждая игра объявляет «оси» настроек (rounds/timer/goal/teams/spies/difficulty),
+// каждая ось — массив значений-опций + лейбл. UI рендерит каждую как ряд тегов.
+const GAME_LOBBY_SCHEMA = {
+  truth:        [['rounds', 'Карточек в партии', [25, 50, 100]]],
+  never:        [['rounds', 'Вопросов', [6, 10, 16, 24]]],
+  whoofus:      [['rounds', 'Голосований', [5, 8, 12, 16]]],
+  most:         [['rounds', 'Голосований', [5, 8, 12, 16]]],
+  five:         [['rounds', 'Раундов', [5, 8, 12]], ['timer', 'Секунд на ответ', [5, 7, 10]]],
+  spy:          [['rounds', 'Раундов', [1, 3, 5]], ['timer', 'Минут на обсуждение', [3, 5, 8]]],
+  crocodile:    [['rounds', 'Раундов', [3, 5, 8, 12]], ['timer', 'Секунд на показ', [45, 60, 90]]],
+  alias:        [['rounds', 'Раундов на команду', [3, 5, 8]], ['timer', 'Секунд на ход', [30, 45, 60]], ['goal', 'Очков до победы', [25, 40, 60]]],
+  whoami:       [['rounds', 'Персонажей на игрока', [1, 2, 3]]],
+  fact:         [['rounds', 'Фактов на игрока', [1, 2, 3, 4]]],
+  memes:        [['rounds', 'Ситуаций', [3, 5, 8, 12]]],
+  taboo:        [['rounds', 'Раундов', [3, 5, 8, 12]], ['timer', 'Секунд на объяснение', [45, 60, 90]]],
+  hot_seat:     [['rounds', 'Вопросов на круг', [3, 5, 8]]],
+  mafia:        [['players', 'Игроков', [6, 8, 10, 12]], ['mafiaCount', 'Мафиози', [1, 2, 3]]],
+  bunker:       [['rounds', 'Раундов отбора', [3, 5, 8]], ['places', 'Мест в бункере', [3, 4, 5, 6]]],
+  associations: [['rounds', 'Слов в цепочке', [5, 8, 12, 16]]],
+}
+const AXIS_DEFAULT = { rounds: 6, timer: 60, goal: 40, players: 8, mafiaCount: 2, places: 4 }
+
+function GameLobbySettings({ game, settings, setSettings, haptic }) {
+  const schema = GAME_LOBBY_SCHEMA[game?.id] || [['rounds', 'Раундов', [3, 5, 6, 10]]]
+  // При смене игры текущее значение может не входить в новые опции —
+  // подставляем минимум из доступных (opts[0]).
+  useEffect(() => {
+    setSettings(s => {
+      const next = { ...s }
+      let changed = false
+      for (const [axis, , opts] of schema) {
+        const cur = next[axis]
+        if (cur == null || !opts.includes(cur)) { next[axis] = opts[0]; changed = true }
+      }
+      return changed ? next : s
+    })
+  }, [game?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <>
+      {schema.map(([axis, label, opts]) => {
+        const current = settings[axis] ?? opts[0]
+        return (
+          <div key={axis} className="lobby-block setup-count-block">
+            <div className="setup-count-label">
+              <Layers size={18}/> {label}
+            </div>
+            <div className="setup-count-row">
+              {opts.map(n => (
+                <button key={n}
+                  className={`setup-count-tab ${current === n ? 'is-active' : ''}`}
+                  aria-pressed={current === n}
+                  onClick={() => { setSettings(s => ({ ...s, [axis]: n })); haptic?.() }}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+// Селектор количества карточек для PlayerSetup. Используется и в lobby через
+// GameLobbySettings — оба теперь рендерятся одинаковым стилем.
+function CardCountSelector({ game, settings, setSettings, style }) {
+  const isTruth = game?.id === 'truth'
+  const opts = isTruth ? [25, 50, 100] : [3, 5, 6, 10]
+  const label = isTruth ? 'Карточек в партии' : 'Раундов в партии'
+  // По умолчанию выбирается наименьшее значение.
+  useEffect(() => {
+    setSettings(s => {
+      const cur = s?.rounds
+      if (cur == null || !opts.includes(cur)) return { ...s, rounds: opts[0] }
+      return s
+    })
+  }, [game?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const current = settings?.rounds ?? opts[0]
+  return (
+    <div className="lobby-block setup-count-block" style={style}>
+      <div className="setup-count-label">
+        <Layers size={18}/> {label}
+      </div>
+      <div className="setup-count-row">
+        {opts.map(n => (
+          <button key={n}
+            className={`setup-count-tab ${current === n ? 'is-active' : ''}`}
+            aria-pressed={current === n}
+            onClick={() => setSettings(s => ({ ...s, rounds: n }))}>
+            {n}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* ─── VibeBurst — 10 разлетающихся эмодзи на 10 секунд при выборе вайба ─── */
+const VIBE_AMBIENT_EMOJI = {
+  funny:       ['😂','🤣','🤡','😅','🤪','😆','🎭','💀'],
+  spicy:       ['🌶️','🔥','💄','😈','💋','🥵','💃','🍷'],
+  chill:       ['🌙','🌿','☁️','💤','🍵','🌸','🪷','🫧'],
+  new_people:  ['🤝','👋','💬','🪩','🎉','✨','🥂','🫂'],
+  deep:        ['❤️','💞','🫀','🪞','💭','🕯️','🌌','🤲'],
+  adult:       ['🔞','💋','😈','🍑','🍆','🥵','🔥','🍷'],
+  ultra_adult: ['💋','🥵','😈','🔞','🍑','🍆','💦','🩷'],
+}
+function VibeBurst({ vibe, burst }) {
+  // burst: { id, x, y } — где x/y координаты центра кликнутой кнопки (или null).
+  const [active, setActive] = useState(false)
+  const burstId = burst?.id || 0
+  useEffect(() => {
+    if (!burstId || !vibe || vibe === 'warmup' || !VIBE_AMBIENT_EMOJI[vibe]) {
+      setActive(false)
+      return
+    }
+    setActive(true)
+    const t = setTimeout(() => setActive(false), 3800)
+    return () => clearTimeout(t)
+  }, [burstId, vibe])
+
+  // 10 эмодзи разлетаются от origin в 10 разных направлений (по кругу).
+  const items = useMemo(() => {
+    const set = VIBE_AMBIENT_EMOJI[vibe] || []
+    if (!set.length) return []
+    return Array.from({ length: 10 }, (_, i) => {
+      const seed = (burstId * 9301 + i * 49297) % 233280
+      const rnd = (n) => ((seed * (i + 1) + n * 6151) % 1000) / 1000
+      // углы: примерно равномерно по кругу + лёгкий jitter
+      const baseAngle = (i / 10) * Math.PI * 2
+      const jitter = (rnd(1) - 0.5) * 0.5  // ±0.25 rad ≈ ±14°
+      const angle = baseAngle + jitter
+      const distance = 180 + rnd(2) * 220 // 180-400px от origin
+      const dx = Math.cos(angle) * distance
+      const dy = Math.sin(angle) * distance - 40 // лёгкая тенденция вверх
+      return {
+        e: set[Math.floor(rnd(3) * set.length)],
+        size: 28 + Math.floor(rnd(4) * 36),  // 28-64px
+        rot: Math.floor(rnd(5) * 120) - 60,  // -60..60 deg
+        delay: rnd(6) * 0.18,                // 0-0.18s
+        dx, dy,
+        scale: 0.85 + rnd(7) * 0.4,         // 0.85-1.25
+      }
+    })
+  }, [burstId, vibe])
+
+  if (!active || !items.length) return null
+  // origin: если координаты кнопки есть — используем их; иначе центр экрана.
+  const originX = (burst?.x != null) ? burst.x : (typeof window !== 'undefined' ? window.innerWidth / 2 : 200)
+  const originY = (burst?.y != null) ? burst.y : (typeof window !== 'undefined' ? window.innerHeight / 2 : 300)
+  return (
+    <div className="vibe-burst" data-vibe={vibe} aria-hidden="true" key={burstId}>
+      {items.map((it, i) => (
+        <span key={i} className="vibe-burst-em" style={{
+          left: `${originX}px`,
+          top: `${originY}px`,
+          fontSize: `${it.size}px`,
+          '--rot': `${it.rot}deg`,
+          '--dx': `${it.dx}px`,
+          '--dy': `${it.dy}px`,
+          '--scl': it.scale,
+          animationDelay: `${it.delay}s`,
+        }}>{it.e}</span>
+      ))}
+    </div>
+  )
+}
+
+/* ─── BottomNav — фикс-меню снизу ────────────────────────────────────────── */
+const NAV_ITEMS = [
+  { id: SCREENS.HOME,         label: 'Дом',     Icon: Home },
+  { id: SCREENS.GAMES,        label: 'Игры',    Icon: Dices },
+  { id: SCREENS.CREATE_LOBBY, label: 'Лобби',   Icon: PartyPopper, accent: true },
+  { id: SCREENS.FRIENDS,      label: 'Друзья',  Icon: Users },
+  { id: SCREENS.SETTINGS,     label: 'Настройки', Icon: Settings },
+]
+
+function BottomNav({ screen, onNavigate }) {
+  return (
+    <nav className="bottom-nav" role="navigation" aria-label="Главное меню">
+      {NAV_ITEMS.map(item => {
+        const active = item.id === screen
+        const { Icon } = item
+        return (
+          <button
+            key={item.id}
+            type="button"
+            className={`bnav-item ${active ? 'is-active' : ''} ${item.accent ? 'is-accent' : ''}`}
+            aria-current={active ? 'page' : undefined}
+            onClick={() => onNavigate(item.id)}
+          >
+            <span className="bnav-ico"><Icon size={item.accent ? 24 : 20}/></span>
+            <span className="bnav-lbl">{item.label}</span>
+          </button>
+        )
+      })}
+    </nav>
+  )
+}
+
+/* ─── ViewedPlayerModal ──────────────────────────────────────────────────── */
+// Карточка чужого игрока без TG-username: имя, аватарка, эмодзи. Лёгкая alt-версия
+// «профиля по тапу на аватарку», когда нет смысла открывать чат.
+function ViewedPlayerModal({ player, onClose }) {
+  if (!player) return null
+  return (
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="welcome-modal" onClick={e => e.stopPropagation()} style={{ textAlign: 'center', padding: '28px 24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
+          <div className="active-player-emoji" style={{ width: 88, height: 88, fontSize: 44 }}>
+            {player.photo_url
+              ? <img src={player.photo_url} alt="" referrerPolicy="no-referrer" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }}/>
+              : <span>{player.emoji || '🎮'}</span>}
+          </div>
+        </div>
+        <h3 style={{ margin: '0 0 8px' }}>{player.name || 'Игрок'}</h3>
+        <p className="lead" style={{ margin: 0 }}>В игре с тобой</p>
+        <button className="btn-primary" style={{ marginTop: 22, width: '100%' }} onClick={onClose}>OK</button>
+      </div>
     </div>
   )
 }
@@ -300,7 +1191,7 @@ export default function App() {
 /* ─── WelcomeModal ───────────────────────────────────────────────────────── */
 function WelcomeModal({ onClose }) {
   return (
-    <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Добро пожаловать в PartyUp">
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Добро пожаловать в PartyUp">
       <div className="welcome-modal" onClick={e => e.stopPropagation()}>
         <div className="welcome-emoji-row">
           {['🎉','🕵️','🎯','😂'].map((e,i) => (
@@ -309,17 +1200,17 @@ function WelcomeModal({ onClose }) {
         </div>
 
         <p className="eyebrow" style={{justifyContent:'center'}}><Sparkles size={13}/> Добро пожаловать</p>
-        <h2 className="gradient-text" style={{textAlign:'center', marginTop: 6}}>PartyUp — твой ведущий</h2>
+        <h2 className="gradient-text" style={{textAlign:'center', marginTop: 6}}>PartyUp — игры для компании</h2>
         <p style={{textAlign:'center', color:'var(--muted)', fontSize:14, marginTop:8, lineHeight:1.6}}>
-          Не просто набор игр — умная система, которая подберёт формат, проведёт раунд и создаст атмосферу.
+          Открыл, выбрал вайб, играешь. 16 классических party-игр — без регистраций, на одном телефоне или вместе по сети.
         </p>
 
         <ul className="welcome-benefits">
           {[
-            { icon: <Rocket size={16}/>, title: 'Старт за 10 секунд', desc: 'Открыл → выбрал вайб → играешь. Никаких регистраций.' },
-            { icon: <Dices size={16}/>, title: '16 игр в одном месте', desc: 'Мафия, Элиас, Шпион, Правда или действие и ещё 12.' },
-            { icon: <Sparkles size={16}/>, title: 'Умный вайб-подбор', desc: 'Выбери настроение — приложение адаптирует вопросы и контент.' },
-            { icon: <Share2 size={16}/>, title: 'Смешные итоги', desc: 'После раунда — карточка с героями вечера. Поделись в чат.' },
+            { icon: <Rocket size={16}/>, title: 'Старт за 10 секунд', desc: 'Выбрал вайб → выбрал игру → играешь. Ни одной формы.' },
+            { icon: <Dices size={16}/>, title: '16 игр в одной коробке', desc: 'Мафия, Бункер, Элиас, Шпион, Правда или действие и ещё 11.' },
+            { icon: <Sparkles size={16}/>, title: 'Умный вайб-подбор', desc: 'Смешной, острый, для близких или 18+ — карточки сами подстроятся.' },
+            { icon: <Share2 size={16}/>, title: 'Играй с друзьями онлайн', desc: 'Создал комнату → отправил ссылку в чат → играете вместе.' },
           ].map(b => (
             <li key={b.title} className="welcome-benefit">
               <div className="benefit-icon">{b.icon}</div>
@@ -331,101 +1222,650 @@ function WelcomeModal({ onClose }) {
           ))}
         </ul>
 
-        <button className="btn-primary" onClick={onClose}>
-          <PartyPopper size={18}/> Начать вечеринку
-        </button>
-        <button className="btn-ghost" onClick={onClose} style={{marginTop:10,width:'100%',justifyContent:'center'}}>
-          Пропустить
+        <button className="btn-primary" onClick={onClose} style={{width:'100%',justifyContent:'center'}}>
+          <PartyPopper size={18}/> Поехали
         </button>
       </div>
     </div>
   )
 }
 
-/* ─── HomeScreen ──────────────────────────────────────────────────────────── */
-function HomeScreen({ picker, setPicker, onPicker, onGame }) {
-  const activeVibe = VIBES.find(v => v.id === picker.vibe) || VIBES[0]
-  const hot = useMemo(() => GAMES.filter(g => g.hot).slice(0, 6), [])
+/* ─── PromoBanners — карусель баннеров ──────────────────────────────────── */
+const PROMO_BANNERS = [
+  { id: 'start', emoji: '⚡', title: 'Старт за 10 секунд', desc: 'Выбери вайб → выбери игру → поехали. Никаких регистраций и настроек.', color: '#7c6fff', color2: '#a78bfa' },
+  { id: 'adult', emoji: '🔞', title: 'Режим 18+', desc: 'Откровенный контент специально для взрослых компаний. Включается одним нажатием.', color: '#ef4444', color2: '#f87171' },
+  { id: 'vibe', emoji: '🌶️', title: 'Умный вайб-фильтр', desc: 'Выбери настроение — вопросы, задания и темп раунда адаптируются автоматически.', color: '#f97316', color2: '#fb923c' },
+  { id: 'content', emoji: '🃏', title: '5000+ карточек', desc: 'Огромное обновление контента: вопросы, действия, ситуации, локации и роли — для каждой игры и каждого вайба.', color: '#8b5cf6', color2: '#a78bfa' },
+]
+
+function PromoBanners() {
+  const [active, setActive] = useState(0)
+  const timerRef = useRef(null)
+  // touch state для свайпов
+  const touchRef = useRef({ x: 0, y: 0, t: 0, locked: null })
+  const [dragOffset, setDragOffset] = useState(0)  // px смещения текущего перетаскивания
+
+  const startAuto = useCallback(() => {
+    clearInterval(timerRef.current)
+    timerRef.current = setInterval(() => setActive(a => (a + 1) % PROMO_BANNERS.length), 4000)
+  }, [])
+
+  const goTo = useCallback((idx) => {
+    setActive(((idx % PROMO_BANNERS.length) + PROMO_BANNERS.length) % PROMO_BANNERS.length)
+    startAuto()
+  }, [startAuto])
+
+  useEffect(() => { startAuto(); return () => clearInterval(timerRef.current) }, [startAuto])
+
+  // touch обработчики: горизонтальный свайп влево/вправо переключает баннер
+  const SWIPE_THRESHOLD = 40 // px
+  const onTouchStart = (e) => {
+    const t = e.touches?.[0]; if (!t) return
+    touchRef.current = { x: t.clientX, y: t.clientY, t: Date.now(), locked: null }
+    setDragOffset(0)
+    clearInterval(timerRef.current)
+  }
+  const onTouchMove = (e) => {
+    const t = e.touches?.[0]; if (!t) return
+    const dx = t.clientX - touchRef.current.x
+    const dy = t.clientY - touchRef.current.y
+    // Лочим направление: если первый явно вертикальный — игнорим, отдаём странице.
+    if (touchRef.current.locked === null) {
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        touchRef.current.locked = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'
+      }
+    }
+    if (touchRef.current.locked === 'h') {
+      e.preventDefault?.()
+      setDragOffset(dx)
+    }
+  }
+  const onTouchEnd = () => {
+    const { locked } = touchRef.current
+    const dx = dragOffset
+    setDragOffset(0)
+    if (locked === 'h' && Math.abs(dx) > SWIPE_THRESHOLD) {
+      goTo(active + (dx < 0 ? 1 : -1))
+    } else {
+      startAuto()
+    }
+    touchRef.current.locked = null
+  }
+
+  const ab = PROMO_BANNERS[active]
+  // Каждый слайд = 100% ширины viewport'а; во время drag добавляем плавный pixel-shift.
+  const wrapWidth = typeof window !== 'undefined' ? window.innerWidth : 320
+  const dragPct = wrapWidth ? (dragOffset / wrapWidth) * 100 : 0
+  const trackStyle = {
+    transform: `translateX(calc(-${active * 100}% + ${dragPct}%))`,
+    transition: dragOffset === 0 ? 'transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
+  }
 
   return (
-    <div>
-      {/* Vibe Section */}
-      <div className="vibe-section">
-        <div className="vibe-section-header">
-          <div className="vibe-section-title">
-            <div className="vibe-icon-glow" aria-hidden="true">
-              <Sparkles size={32} color="var(--accent-2)"/>
+    <div className="promo-banners">
+      <div className="promo-carousel-viewport"
+        style={{'--pb-c1': ab.color, '--pb-c2': ab.color2}}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
+      >
+        <div className="promo-carousel-track" style={trackStyle}>
+          {PROMO_BANNERS.map(b => (
+            <div key={b.id} className="promo-slide" style={{'--pb-c1': b.color, '--pb-c2': b.color2}}>
+              <div className="promo-banner-emoji">{b.emoji}</div>
+              <div className="promo-banner-body">
+                <div className="promo-banner-title">{b.title}</div>
+                <div className="promo-banner-desc">{b.desc}</div>
+              </div>
             </div>
-            Вайб компании
-          </div>
-          <p className="vibe-section-desc">
-            Выбери настроение — и приложение адаптирует <strong>вопросы, задания и контент</strong> под твою компанию.
-          </p>
-        </div>
-        <div className="vibe-scroll" role="listbox" aria-label="Выбор вайба">
-          {VIBES.map(v => (
-            <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
-              className={`vibe-chip ${v.id === picker.vibe ? 'is-active' : ''}`}
-              onClick={() => setPicker(p => ({...p, vibe: v.id}))}>
-              <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={20}/></span>
-              <span className="vibe-chip-label">{v.label}</span>
-              <span className="vibe-chip-hint">{v.hint}</span>
-            </button>
           ))}
         </div>
-        <div className="vibe-affects">
-          <Info size={14} color="var(--accent)" style={{flexShrink:0, marginTop:1}}/>
-          <span>
-            <span className="vibe-affects-label">Влияет на: </span>
-            вопросы, задания, темп раунда, интенсивность контента и подобранные игры из каталога.
-          </span>
-        </div>
       </div>
-
-      {/* Hot games */}
-      <div className="section-header">
-        <span className="section-title">
-          <Flame size={16} style={{display:'inline',marginRight:6,color:'#ff9500'}}/>
-          Популярно
-        </span>
-        <PressBtn className="btn-suggest" onClick={onPicker} delay={160}>
-          <Compass size={14}/> Подобрать игру
-        </PressBtn>
-      </div>
-      <div className="game-list">
-        {hot.map(g => (
-          <PressBtn key={g.id} className="game-row-item" onClick={() => onGame(g.id)} delay={180}>
-            <div className="game-icon-token">
-              <GameIcon gameId={g.id} size={22} color="var(--accent-2)"/>
-            </div>
-            <div className="game-row-text">
-              <div className="game-row-title">
-                {g.title}
-                {g.hot && <span className="tag tag-hot">HOT</span>}
-              </div>
-              <div className="game-row-sub">{g.short}</div>
-              <div className="game-row-meta">
-                <span className="tag"><Users size={10}/> {g.players}</span>
-                <span className="tag"><Clock size={10}/> {g.durationMin}+ мин</span>
-              </div>
-            </div>
-            <ChevronRight size={16} className="game-row-arrow"/>
-          </PressBtn>
+      <div className="promo-dots">
+        {PROMO_BANNERS.map((_, i) => (
+          <button key={i} className={`promo-dot ${i === active ? 'is-active' : ''}`}
+            onClick={() => goTo(i)} aria-label={`Баннер ${i+1}`}/>
         ))}
       </div>
     </div>
   )
 }
 
+/* ─── AdultWarningModal ──────────────────────────────────────────────────── */
+function AdultWarningModal({ onConfirm, onCancel, vibe = 'adult' }) {
+  const isUltra = vibe === 'ultra_adult'
+  // Рендерим через Portal прямо в document.body — гарантирует, что fixed/flex
+  // позиционирование не ломается родительскими stacking-contexts.
+  if (typeof document === 'undefined') return null
+  return createPortal(
+    <div className="adult-fullscreen" onClick={onCancel} role="dialog" aria-modal="true"
+      aria-label={isUltra ? 'Предупреждение 24+' : 'Предупреждение 18+'}>
+      <div className="adult-modal-content" onClick={e => e.stopPropagation()}>
+        <div className="adult-modal-icon">{isUltra ? '💋' : '🔞'}</div>
+        <h3 className="adult-modal-title">
+          {isUltra ? 'Самые откровенные темы' : 'Только для взрослых'}
+        </h3>
+        <p className="adult-modal-text">
+          {isUltra ? (
+            <>
+              Этот режим — про <strong>интимные подробности и кринж в постели</strong>:
+              фетиши, провалы, специфические сценарии. Включай только в очень близкой
+              компании или с парой.
+            </>
+          ) : (
+            <>
+              Этот режим содержит <strong>откровенный контент 18+</strong>:
+              провокационные вопросы, горячие задания и взрослые темы.
+            </>
+          )}
+        </p>
+        <ul className="adult-modal-rules">
+          <li>🔞 Все участники старше 18 лет</li>
+          <li>🚪 Вокруг нет детей или посторонних</li>
+          <li>💬 Любой может пропустить вопрос — без давления</li>
+        </ul>
+        <button className="btn-adult-confirm" onClick={onConfirm}>
+          <Lock size={16}/> Мне 18+, поехали
+        </button>
+        <button className="btn-ghost mt-10" style={{width:'100%',justifyContent:'center'}} onClick={onCancel}>
+          <ArrowLeft size={14}/> Назад, выбрать другой вайб
+        </button>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
+/* ─── Тематические секции игр ────────────────────────────────────────────── */
+const GAME_SECTIONS = [
+  { id: 'warmup',    emoji: '🎯', title: 'Простые игры',      ids: ['truth','never','whoofus','five','associations'] },
+  { id: 'roles',     emoji: '🎭', title: 'Роли и детектив',  ids: ['mafia','bunker','spy','whoami'] },
+  { id: 'explain',   emoji: '💬', title: 'Объяснялки',       ids: ['crocodile','alias','taboo','memes'] },
+  { id: 'deep',      emoji: '🔍', title: 'Глубже',           ids: ['hot_seat','fact','most'] },
+]
+
+function GameSections({ onGame }) {
+  const gameMap = useMemo(() => Object.fromEntries(GAMES.map(g => [g.id, g])), [])
+  return (
+    <div className="game-sections">
+      {GAME_SECTIONS.map((sec, si) => (
+        <div key={sec.id} className="game-section">
+          <div className="game-section-header">
+            <span className="game-section-emoji">{sec.emoji}</span>
+            <span className="game-section-title">{sec.title}</span>
+          </div>
+          <div className="game-list">
+            {sec.ids.map((id, i) => gameMap[id] && (
+              <GameRowItem key={id} g={gameMap[id]} onGame={onGame}
+                style={{animationDelay:`${si * 0.06 + i * 0.04}s`}}/>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ─── HomeScreen ──────────────────────────────────────────────────────────── */
+function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }) {
+  const [vibeToast, setVibeToast] = useState(false)
+  const [showAdultModal, setShowAdultModal] = useState(null)
+  const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
+  // Autoscroll к активному vibe-чипу при монтировании/смене вайба.
+  const vibeScrollRef = useRef(null)
+  useEffect(() => {
+    const wrap = vibeScrollRef.current
+    if (!wrap) return
+    const active = wrap.querySelector('.vibe-chip.is-active')
+    if (!active) return
+    const wRect = wrap.getBoundingClientRect()
+    const aRect = active.getBoundingClientRect()
+    const offset = (aRect.left - wRect.left) + aRect.width / 2 - wRect.width / 2
+    wrap.scrollTo({ left: wrap.scrollLeft + offset, behavior: 'smooth' })
+  }, [picker.vibe])
+
+  const handleVibeChange = (vibeId, evt) => {
+    if (vibeId === picker.vibe) { onBurst?.(evt); return }
+    if (vibeId === 'adult' || vibeId === 'ultra_adult') {
+      setPendingAdultEvt(evt); setShowAdultModal(vibeId); return
+    }
+    setPicker(p => ({ ...p, vibe: vibeId }))
+    ev.vibeChange(vibeId)
+    onBurst?.(evt)
+    setVibeToast(true)
+  }
+
+  const confirmAdult = () => {
+    const v = showAdultModal
+    setPicker(p => ({ ...p, vibe: v }))
+    ev.vibeChange(v)
+    setShowAdultModal(null)
+    onBurst?.(pendingAdultEvt)
+    setVibeToast(true)
+  }
+
+  return (
+    <div>
+      {/* Promo banners */}
+      <PromoBanners />
+
+      {/* Vibe Section */}
+      <div className="vibe-section">
+        <div className="vibe-section-header">
+          <div className="vibe-section-title">
+            <div className="vibe-icon-glow" aria-hidden="true">
+              <Sparkles size={22} color="var(--accent-2)"/>
+            </div>
+            Выберите вайб компании
+          </div>
+          <p className="vibe-section-desc">
+            Выбери настроение — приложение адаптирует <strong>вопросы, задания и контент</strong> под твою компанию.
+          </p>
+        </div>
+        <div ref={vibeScrollRef} className="vibe-scroll" role="listbox" aria-label="Выбор вайба">
+          {VIBES.map(v => (
+            <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
+              className={`vibe-chip ${v.id === picker.vibe ? 'is-active' : ''}`}
+              data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+              onClick={(e) => handleVibeChange(v.id, e)}>
+              <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={20}/></span>
+              <span className="vibe-chip-label">{v.label}</span>
+              <span className="vibe-chip-hint">{v.hint}</span>
+            </button>
+          ))}
+        </div>
+        {vibeToast && (
+          <div className="vibe-affects" key={picker.vibe}>
+            <Info size={14} color="var(--accent)" style={{flexShrink:0, marginTop:1}}/>
+            <span>
+              <span className="vibe-affects-label">Влияет на: </span>
+              вопросы, задания, темп раунда, интенсивность контента и подобранные игры.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Section header: Популярные игры */}
+      <div className="section-header" style={{marginTop: 24}}>
+        <div className="vibe-section-title" style={{marginBottom: 0}}>
+          <div className="vibe-icon-glow" aria-hidden="true">
+            <Flame size={22} color="var(--accent-2)"/>
+          </div>
+          Популярные игры
+        </div>
+      </div>
+
+      {/* Top 5 без категорий */}
+      <div className="game-list" style={{marginTop: 12}}>
+        {GAMES.slice(0, 5).map((g, i) => (
+          <GameRowItem key={g.id} g={g} onGame={onGame}
+            style={{animationDelay:`${i * 0.04}s`}}/>
+        ))}
+      </div>
+
+      {/* Все игры */}
+      <PressBtn className="btn-all-games" onClick={onAllGames} delay={160}>
+        <span>Все игры</span>
+        <ChevronRight size={16}/>
+      </PressBtn>
+
+      {showAdultModal && (
+        <AdultWarningModal
+          vibe={showAdultModal}
+          onConfirm={confirmAdult}
+          onCancel={() => setShowAdultModal(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ─── VibeMiniBar — горизонтальный скролл вайбов с автоскроллом к активному ─ */
+function VibeMiniBar({ picker, onPickVibe, showLabel = true }) {
+  const scrollRef = useRef(null)
+  // Автоскролл к активному чипу при монтировании и при смене вайба
+  // (например, переход с Home, где выбран 24+, на Games — список сразу
+  // сдвинется так, чтобы было видно «24+» в видимой области).
+  useEffect(() => {
+    const wrap = scrollRef.current
+    if (!wrap) return
+    const active = wrap.querySelector('.vibe-chip-mini.is-active')
+    if (!active) return
+    const wRect = wrap.getBoundingClientRect()
+    const aRect = active.getBoundingClientRect()
+    const offset = (aRect.left - wRect.left) + aRect.width / 2 - wRect.width / 2
+    wrap.scrollTo({ left: wrap.scrollLeft + offset, behavior: 'smooth' })
+  }, [picker.vibe])
+  return (
+    <div ref={scrollRef} className="vibe-scroll vibe-scroll-mini" role="listbox" aria-label="Вайб">
+      {showLabel && <span className="vibe-scroll-label">Ваш вайб:</span>}
+      {VIBES.map(v => (
+        <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
+          className={`vibe-chip vibe-chip-mini ${v.id === picker.vibe ? 'is-active' : ''}`}
+          data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+          onClick={(e) => onPickVibe(v.id, e)}>
+          <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={16}/></span>
+          <span className="vibe-chip-label">{v.label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/* ─── GamesScreen — полный каталог по категориям + мини вайб-чипы ───────── */
+function GamesScreen({ picker, setPicker, onGame, onBurst }) {
+  const [showAdultModal, setShowAdultModal] = useState(null)
+  const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
+  const handleVibe = (vibeId, evt) => {
+    if (vibeId === picker.vibe) { onBurst?.(evt); return }
+    if (vibeId === 'adult' || vibeId === 'ultra_adult') {
+      setPendingAdultEvt(evt); setShowAdultModal(vibeId); return
+    }
+    setPicker(p => ({ ...p, vibe: vibeId }))
+    ev.vibeChange(vibeId)
+    onBurst?.(evt)
+  }
+  const confirmAdult = () => {
+    const v = showAdultModal
+    setPicker(p => ({ ...p, vibe: v }))
+    ev.vibeChange(v)
+    setShowAdultModal(null)
+    onBurst?.(pendingAdultEvt)
+  }
+  return (
+    <div>
+      <p className="eyebrow"><Dices size={13}/> Каталог</p>
+      <h2 style={{marginBottom: 14}}>Игры по категориям</h2>
+
+      <VibeMiniBar picker={picker} onPickVibe={handleVibe}/>
+
+      <div style={{marginTop: 16}}>
+        <GameSections onGame={onGame}/>
+      </div>
+
+      {showAdultModal && (
+        <AdultWarningModal
+          vibe={showAdultModal}
+          onConfirm={confirmAdult}
+          onCancel={() => setShowAdultModal(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ─── CreateLobbyScreen — настройки лобби в одном экране ─────────────────── */
+function CreateLobbyScreen({ picker, setPicker, settings, setSettings, myName, onCreate, onEnterRoom, haptic, onBurst }) {
+  const [selectedId, setSelectedId] = useState(() => GAMES[0]?.id)
+  const [showAdultModal, setShowAdultModal] = useState(null)
+  const [code, setCode] = useState('')
+  const selected = useMemo(() => GAMES.find(g => g.id === selectedId) || GAMES[0], [selectedId])
+
+  const ROUND_OPTIONS = [3, 5, 6, 10]
+  const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
+
+  const handleVibe = (vibeId, evt) => {
+    if (vibeId === picker.vibe) { onBurst?.(evt); return }
+    if (vibeId === 'adult' || vibeId === 'ultra_adult') {
+      setPendingAdultEvt(evt); setShowAdultModal(vibeId); return
+    }
+    setPicker(p => ({ ...p, vibe: vibeId }))
+    ev.vibeChange(vibeId)
+    onBurst?.(evt)
+  }
+  const confirmAdult = () => {
+    const v = showAdultModal
+    setPicker(p => ({ ...p, vibe: v }))
+    ev.vibeChange(v)
+    setShowAdultModal(null)
+    onBurst?.(pendingAdultEvt)
+  }
+
+  const invite = async () => {
+    const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, 'from_share') || 'https://partyup-game.ru'
+    const text = `Зову играть в PartyUp 🎮 — ${selected.title}`
+    await doInviteShare({ deeplink, text, gameId: selected.id, kind: 'invite', evName: 'lobby_pre_invite' })
+  }
+
+  const [joinChecking, setJoinChecking] = useState(false)
+  const tryJoin = async () => {
+    const c = code.trim().toUpperCase()
+    if (!/^[A-Z0-9]{4,12}$/.test(c)) {
+      haptic?.('error')
+      flashToast('Введи код из 4–12 символов (буквы и цифры)')
+      return
+    }
+    setJoinChecking(true)
+    try {
+      // Проверяем, существует ли активная комната, прежде чем переходить.
+      const r = await api.roomState(c)
+      if (!r || r.error === 'room_not_found') {
+        haptic?.('error')
+        flashToast('Комнаты с таким кодом не существует')
+        return
+      }
+      if (r.state === 'ended') {
+        haptic?.('error')
+        flashToast('Игра в этой комнате уже закончилась')
+        return
+      }
+      haptic?.('success')
+      onEnterRoom(c)
+    } catch {
+      haptic?.('error')
+      flashToast('Не удалось проверить комнату — попробуй ещё раз')
+    } finally {
+      setJoinChecking(false)
+    }
+  }
+
+  return (
+    <div>
+      <p className="eyebrow"><PartyPopper size={13}/> Онлайн-лобби</p>
+      <h2 style={{marginBottom: 6}}>Создать лобби</h2>
+      <p className="lead" style={{marginBottom: 18}}>
+        {myName ? <>Хост: <strong>{myName}</strong>. </> : null}
+        Настрой раунд и пригласи друзей по ссылке.
+      </p>
+
+      {/* Вайб — теперь сверху */}
+      <div className="lobby-block">
+        <div className="lobby-block-label"><Sparkles size={14}/> Вайб</div>
+        <VibeMiniBar picker={picker} onPickVibe={handleVibe} showLabel={false}/>
+      </div>
+
+      {/* Игра — с иконками из каталога */}
+      <div className="lobby-block">
+        <div className="lobby-block-label"><Dices size={14}/> Игра</div>
+        <div className="lobby-game-pick" role="listbox" aria-label="Выбор игры">
+          {GAMES.map(g => (
+            <button key={g.id} role="option" aria-selected={g.id === selectedId}
+              className={`lobby-game-chip ${g.id === selectedId ? 'is-active' : ''}`}
+              onClick={() => { setSelectedId(g.id); haptic?.() }}>
+              <span className="lgc-icon"><GameIcon gameId={g.id} size={22}/></span>
+              <span className="lgc-name">{g.title}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Настройки выбранной игры — динамические */}
+      <GameLobbySettings game={selected} settings={settings} setSettings={setSettings} haptic={haptic}/>
+
+      {/* CTA: только «Создать комнату» */}
+      <PressBtn className="btn-primary lobby-cta-create" style={{width:'100%', marginTop: 4}}
+        onClick={() => onCreate(selectedId)} delay={140}>
+        <Play size={16}/> Создать комнату
+      </PressBtn>
+
+      {/* Войти в комнату (перенесено из «Друзей») */}
+      <div className="card friends-card lobby-join-card" style={{marginTop: 18}}>
+        <div className="friends-card-icon"><Key size={20}/></div>
+        <div className="friends-card-body">
+          <div className="friends-card-title">Войти в комнату</div>
+          <div className="friends-card-desc">У тебя есть код от друга? Введи его.</div>
+          <div className="lobby-join-row">
+            <input
+              className="lobby-join-input"
+              value={code}
+              onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+              placeholder="КОД (ABC123)"
+              maxLength={12}
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <PressBtn className="btn-primary lobby-join-btn" onClick={tryJoin} delay={120}
+              disabled={joinChecking || code.length < 4}>
+              {joinChecking ? '…' : <><ChevronRight size={16}/> Войти</>}
+            </PressBtn>
+          </div>
+        </div>
+      </div>
+
+      {showAdultModal && (
+        <AdultWarningModal
+          vibe={showAdultModal}
+          onConfirm={confirmAdult}
+          onCancel={() => setShowAdultModal(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ─── FriendsScreen — приглашение + список соигроков ─────────────────────── */
+function FriendsScreen() {
+  const [friends, setFriends] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    api.friends().then(r => {
+      if (cancelled) return
+      setFriends(Array.isArray(r?.rows) ? r.rows : [])
+      setLoading(false)
+    }).catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const invite = async () => {
+    const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, 'friends_invite') || 'https://partyup-game.ru'
+    const text = 'Зову играть в PartyUp 🎮 — 16 игр для весёлой компании'
+    await doInviteShare({ deeplink, text, kind: 'invite', evName: 'friends_invite' })
+  }
+
+  const dmFriend = (username) => {
+    if (!username) return
+    const tg = window.Telegram?.WebApp
+    const link = `https://t.me/${username}`
+    if (tg?.openTelegramLink) tg.openTelegramLink(link)
+    else window.open(link, '_blank')
+  }
+
+  return (
+    <div>
+      <p className="eyebrow"><Users size={13}/> Друзья</p>
+      <h2 style={{marginBottom: 18}}>Сыграйте вместе</h2>
+
+      {/* Пригласить */}
+      <div className="card friends-card">
+        <div className="friends-card-icon"><Send size={20}/></div>
+        <div className="friends-card-body">
+          <div className="friends-card-title">Позвать в PartyUp</div>
+          <div className="friends-card-desc">Отправь другу ссылку — он откроет приложение сразу.</div>
+          <PressBtn className="btn-primary" style={{width:'100%', marginTop: 12}} onClick={invite} delay={140}>
+            <Share2 size={16}/> Поделиться
+          </PressBtn>
+        </div>
+      </div>
+
+      {/* Список соигроков */}
+      <div className="friends-list-block">
+        <div className="friends-list-header">
+          <Heart size={14}/> Игроки из ваших комнат
+        </div>
+        {loading && <div className="friends-empty">Загружаем…</div>}
+        {!loading && friends.length === 0 && (
+          <div className="friends-empty">
+            Пока пусто. Создайте лобби и позовите друга — он появится здесь.
+          </div>
+        )}
+        {!loading && friends.length > 0 && (
+          <div className="friends-list">
+            {friends.map(f => (
+              <button key={f.user_id} className="friend-row"
+                onClick={() => dmFriend(f.username)}
+                title={f.username ? `Открыть чат с @${f.username}` : ''}>
+                <div className="friend-avatar">
+                  {f.photo_url
+                    ? <img src={f.photo_url} alt="" referrerPolicy="no-referrer"/>
+                    : <span>{(f.display_name || f.username || '?').slice(0,1).toUpperCase()}</span>}
+                </div>
+                <div className="friend-info">
+                  <div className="friend-name">{f.display_name || `@${f.username || 'игрок'}`}</div>
+                  <div className="friend-meta">{f.games_together} игр{f.games_together === 1 ? 'а' : ''} вместе</div>
+                </div>
+                {f.username && <ChevronRight size={16} color="var(--muted)"/>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ─── GameRowItem — shared card component ───────────────────────────────── */
+function GameRowItem({ g, onGame, style, className }) {
+  return (
+    <PressBtn
+      className={className || 'game-row-item'}
+      onClick={() => onGame(g.id)}
+      delay={180}
+      style={style}
+    >
+      <div className="game-icon-token">
+        <GameIcon gameId={g.id} size={30} color="var(--accent-2)"/>
+      </div>
+      <div className="game-row-text">
+        <div className="game-row-title">{g.title}</div>
+        <div className="game-row-sub">{g.short}</div>
+      </div>
+      <div className="game-play-btn" aria-hidden="true">
+        <Play size={13} fill="currentColor" strokeWidth={0}/>
+      </div>
+    </PressBtn>
+  )
+}
+
 /* ─── PickerScreen ────────────────────────────────────────────────────────── */
 function PickerScreen({ picker, setPicker, recommendations, onSelect }) {
   const [step, setStep] = useState(0)
+  const [showAdultModal, setShowAdultModal] = useState(null)
   const steps = [
     { title: 'Сколько вас?', key: 'players', options: PLAYER_PRESETS.map(p => ({ id: p.id, icon: <Users size={22} color="var(--accent-2)"/>, label: p.label, desc: `${p.range[0]}–${p.range[1]} человек` })) },
     { title: 'Какой вайб?', key: 'vibe', options: VIBES.map(v => ({ id: v.id, icon: <VibeIcon vibeId={v.id} size={22}/>, label: v.label, desc: v.hint })) },
     { title: 'Сколько времени?', key: 'duration', options: DURATION_PRESETS.map(d => ({ id: d.id, icon: <Timer size={22} color="var(--accent-2)"/>, label: d.label, desc: '' })) },
   ]
   const cur = steps[step]
+
+  const handlePickerOptionClick = (key, id) => {
+    if (key === 'vibe' && (id === 'adult' || id === 'ultra_adult')) {
+      setShowAdultModal(id)
+      return
+    }
+    setPicker(p => ({ ...p, [key]: id }))
+    if (step < steps.length - 1) setStep(s => s + 1)
+  }
+
+  const confirmAdult = () => {
+    const v = showAdultModal
+    setPicker(p => ({ ...p, vibe: v }))
+    setShowAdultModal(null)
+    if (step < steps.length - 1) setStep(s => s + 1)
+  }
 
   if (step >= steps.length) {
     return <RecommendResults recommendations={recommendations} onSelect={onSelect} onReset={() => setStep(0)} />
@@ -442,7 +1882,7 @@ function PickerScreen({ picker, setPicker, recommendations, onSelect }) {
         {cur.options.map(o => (
           <button key={o.id}
             className={`picker-option ${picker[cur.key] === o.id ? 'is-selected' : ''}`}
-            onClick={() => { setPicker(p=>({...p,[cur.key]:o.id})); if (step < steps.length-1) setStep(s=>s+1) }}
+            onClick={() => handlePickerOptionClick(cur.key, o.id)}
             aria-pressed={picker[cur.key] === o.id}>
             <span className="picker-option-icon">{o.icon}</span>
             <span className="picker-option-label">{o.label}</span>
@@ -459,6 +1899,10 @@ function PickerScreen({ picker, setPicker, recommendations, onSelect }) {
         <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(s=>s-1)}>
           <ArrowLeft size={15}/> Назад
         </button>
+      )}
+
+      {showAdultModal && (
+        <AdultWarningModal vibe={showAdultModal} onConfirm={confirmAdult} onCancel={() => setShowAdultModal(null)} />
       )}
     </div>
   )
@@ -495,7 +1939,7 @@ function RecommendResults({ recommendations, onSelect, onReset }) {
 /* ─── GameDetailScreen ───────────────────────────────────────────────────── */
 function GameDetailScreen({ game, onSetup }) {
   return (
-    <div>
+    <div className="game-detail-screen">
       <div className="game-hero">
         <div className="game-hero-icon"><GameIcon gameId={game.id} size={40} color="var(--accent-2)"/></div>
         <h2>{game.title}</h2>
@@ -530,7 +1974,7 @@ function GameDetailScreen({ game, onSetup }) {
         </div>
       </div>
 
-      <div className="play-actions">
+      <div className="game-detail-cta">
         <button className="btn-primary" onClick={onSetup}>
           <Play size={17}/> Играть
         </button>
@@ -540,10 +1984,32 @@ function GameDetailScreen({ game, onSetup }) {
 }
 
 /* ─── PlayerSetupScreen ──────────────────────────────────────────────────── */
-function PlayerSetupScreen({ game, onStart, onBack }) {
-  const [step, setStep] = useState(0) // 0=mode, 1=names
-  const [mode, setMode] = useState('one_phone')
-  const [names, setNames] = useState(['Вы', 'Игрок 2', 'Игрок 3'])
+function PlayerSetupScreen({ game, onStart, onBack, myName, initialMode, settings, setSettings, auth, onAvatarClick }) {
+  // Если попали сюда из «Создать лобби» (initialMode='multiplayer'),
+  // пропускаем шаг выбора режима — игра уже подразумевается онлайн.
+  const [step, setStep] = useState(initialMode ? 1 : 0)
+  const [mode, setMode] = useState(initialMode || 'one_phone')
+  const PLACEHOLDER_ME = 'Вы'
+  const cleanReal = (s) => {
+    const x = sanitizeName(s || '', 32)
+    return x === PLACEHOLDER_ME ? '' : x
+  }
+  const [names, setNames] = useState(() => {
+    let initial = cleanReal(myName)
+    if (!initial) {
+      try { initial = cleanReal(localStorage.getItem('pu_my_name') || '') } catch {}
+    }
+    // Если реального имени ещё нет — оставляем пустую строку, чтобы в инпуте
+    // отображался placeholder («Ваше имя» / «Игрок 1»), а не плейсхолдерное «Вы».
+    return [initial || '', 'Игрок 2', 'Игрок 3']
+  })
+  // Поле 0 редактировано вручную?
+  const firstEditedRef = useRef(false)
+  useEffect(() => {
+    const real = cleanReal(myName)
+    if (!real || firstEditedRef.current) return
+    setNames(n => (n[0] === real ? n : [real, ...n.slice(1)]))
+  }, [myName])
 
   const modeOptions = [
     {
@@ -554,23 +2020,22 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
       disabled: false,
     },
     {
-      id: 'all_see',
-      icon: <Users size={22} color="var(--accent-2)"/>,
-      label: 'Все видят экран',
-      desc: 'Телефон лежит на столе',
-      disabled: false,
-    },
-    {
       id: 'multiplayer',
-      icon: <Share2 size={22} color="var(--muted)"/>,
+      icon: <Share2 size={22} color="var(--accent-2)"/>,
       label: 'Мультиплеер',
       desc: 'У каждого свой телефон',
-      disabled: true,
-      badge: 'Скоро',
+      disabled: false,
     },
   ]
 
-  const updateName = (i, val) => setNames(n => n.map((name, idx) => idx === i ? val : name))
+  // Sanitize on-input. Пробелы между словами разрешены (sanitizeName схлопывает
+  // повторные пробелы до одного и трим — это нужно, чтобы можно было ввести
+  // «Имя Фамилия»). Опасные символы и управляющие — выпиливаются.
+  const updateName = (i, val) => {
+    const cleaned = sanitizeName(val, 32)
+    if (i === 0) firstEditedRef.current = true
+    setNames(n => n.map((name, idx) => idx === i ? cleaned : name))
+  }
   const addPlayer = () => {
     if (names.length >= 10) return
     setNames(n => [...n, `Игрок ${n.length + 1}`])
@@ -578,6 +2043,25 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
   const removePlayer = (i) => {
     if (names.length <= 2) return
     setNames(n => n.filter((_, idx) => idx !== i))
+  }
+
+  // Финальная очистка перед стартом + защита от пустых имён.
+  const handleStart = (rawNames, m) => {
+    const finalNames = rawNames.map((n, i) => {
+      const s = sanitizeName(n, 32)
+      return s || `Игрок ${i + 1}`
+    })
+    // Сохраним «моё» имя локально и на сервере, чтобы при следующих заходах
+    // в лобби/комнаты оно сразу подставлялось во все нужные поля.
+    try {
+      const myFinal = finalNames[0]
+      if (myFinal) {
+        localStorage.setItem('pu_my_name', myFinal)
+        // best-effort: серверу сообщим display_name (только если авторизованы)
+        api.updateMe({ display_name: myFinal }).catch(() => {})
+      }
+    } catch {}
+    onStart(finalNames, m)
   }
 
   if (step === 0) {
@@ -606,10 +2090,69 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
           ))}
         </div>
 
-        <button className="btn-primary mt-16" onClick={() => setStep(1)}>
-          <ChevronRight size={17}/> Далее
+        {/* Количество карточек в партии — зависит от игры (Truth: 25/50/100). */}
+        {setSettings && (
+          <CardCountSelector
+            game={game}
+            settings={settings}
+            setSettings={setSettings}
+            style={{ marginTop: 24 }}
+          />
+        )}
+
+        <button className="btn-primary mt-16" onClick={() => {
+          if (mode === 'multiplayer') {
+            // Мультиплеер — без отдельного экрана имени: имя берём из TG / localStorage.
+            const stored = (typeof localStorage !== 'undefined' && localStorage.getItem('pu_my_name')) || ''
+            const me = sanitizeName(myName || stored, 32) || 'Хост'
+            handleStart([me], 'multiplayer')
+          } else {
+            setStep(1)
+          }
+        }}>
+          {mode === 'multiplayer'
+            ? <><Play size={17}/> Создать комнату</>
+            : <><ChevronRight size={17}/> Далее</>}
         </button>
         <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
+          <ArrowLeft size={15}/> Назад
+        </button>
+      </div>
+    )
+  }
+
+  // Multiplayer: only enter your own name (legacy, не должен срабатывать)
+  if (mode === 'multiplayer') {
+    const myName = names[0]
+    return (
+      <div>
+        <p className="eyebrow"><Share2 size={13}/> Мультиплеер</p>
+        <h2 style={{marginBottom:6}}>Ваше имя</h2>
+        <p className="lead" style={{marginBottom:16}}>{game.title} · другие присоединятся по ссылке</p>
+
+        <div className="setup-player-list">
+          <div className="setup-player-row">
+            <div className="setup-player-emoji">{EMOJIS[0]}</div>
+            <input
+              className="setup-player-input"
+              value={myName}
+              onChange={e => { firstEditedRef.current = true; setNames([sanitizeName(e.target.value, 32)]) }}
+              placeholder="Ваше имя (хост)"
+              maxLength={20}
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div className="mp-setup-hint">
+          <Info size={14} style={{flexShrink:0, marginTop:1}}/>
+          <span>Создайте комнату и пригласите друзей по ссылке. У каждого будет свой телефон.</span>
+        </div>
+
+        <button className="btn-primary mt-16" onClick={() => handleStart([myName || 'Хост'], mode)}>
+          <Play size={17}/> Создать комнату
+        </button>
+        <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(0)}>
           <ArrowLeft size={15}/> Назад
         </button>
       </div>
@@ -625,12 +2168,19 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
       <div className="setup-player-list">
         {names.map((name, i) => (
           <div key={i} className="setup-player-row">
-            <div className="setup-player-emoji">{EMOJIS[i % EMOJIS.length]}</div>
+            {i === 0 && avatarUrl(auth) ? (
+              <button type="button" className="setup-player-emoji setup-player-avatar"
+                onClick={() => onAvatarClick?.()} aria-label="Открыть профиль">
+                <img src={avatarUrl(auth)} alt="" referrerPolicy="no-referrer"/>
+              </button>
+            ) : (
+              <div className="setup-player-emoji">{EMOJIS[i % EMOJIS.length]}</div>
+            )}
             <input
               className="setup-player-input"
               value={name}
               onChange={e => updateName(i, e.target.value)}
-              placeholder={`Игрок ${i + 1}`}
+              placeholder={i === 0 ? 'Ваше имя' : `Игрок ${i + 1}`}
               maxLength={20}
             />
             {names.length > 2 && (
@@ -648,7 +2198,7 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
         </button>
       )}
 
-      <button className="btn-primary mt-16" onClick={() => onStart(names, mode)}>
+      <button className="btn-primary mt-16" onClick={() => handleStart(names, mode)}>
         <Play size={17}/> Начать игру
       </button>
       <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(0)}>
@@ -659,7 +2209,86 @@ function PlayerSetupScreen({ game, onStart, onBack }) {
 }
 
 /* ─── LobbyScreen ────────────────────────────────────────────────────────── */
-function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe }) {
+// Лейбл «карточек/раундов/вопросов» в зависимости от типа игры.
+function lobbyCountLabel(game) {
+  const id = game?.id
+  if (id === 'truth') return 'Карточек'
+  if (['never','whoofus','most','hot_seat'].includes(id)) return 'Вопросов'
+  if (['fact','memes','associations','five','alias','crocodile','taboo','whoami'].includes(id)) return 'Карточек'
+  if (['mafia','bunker','spy'].includes(id)) return 'Раундов'
+  return 'Раундов'
+}
+
+function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe, haptic, isMultiplayer, isHost, roomId, onRoomPlayersUpdate, onGameStartedByHost, auth, onPlayerAvatarClick, myId }) {
+  const [codeCopied, setCodeCopied] = useState(false)
+
+  // Multiplayer polling in lobby — adaptive:
+  // • visibility-gate (вкладка скрыта → пауза)
+  // • если в комнате 1 игрок (тестируешь сам) — медленный heartbeat 8 c,
+  //   иначе 3 c. Сразу же ускоряемся, когда кто-то заходит.
+  // • If-None-Match: сервер вернёт 304 если ничего не менялось — экономит трафик.
+  useEffect(() => {
+    if (!isMultiplayer || !roomId) return
+    let cancelled = false
+    let timer = null
+    let lastEtag = null
+    const poll = async () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
+      try {
+        const headers = lastEtag ? { 'If-None-Match': lastEtag } : undefined
+        const res = await fetch(`/api/room/${roomId}`, { headers })
+        if (cancelled) return
+        if (res.status === 304) { schedule(); return }
+        if (!res.ok) { schedule(); return }
+        const et = res.headers.get('etag'); if (et) lastEtag = et
+        const serverRoom = await res.json()
+        if (serverRoom.players && onRoomPlayersUpdate) onRoomPlayersUpdate(serverRoom.players)
+        if (serverRoom.state === 'playing' && !isHost && onGameStartedByHost) onGameStartedByHost()
+      } catch {}
+      schedule()
+    }
+    const schedule = () => {
+      if (cancelled) return
+      const alone = (players?.length ?? 1) <= 1
+      const delay = alone ? 8000 : 3000
+      timer = setTimeout(poll, delay)
+    }
+    poll()
+    const onVis = () => { if (!document.hidden) { if (timer) clearTimeout(timer); poll() } }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { cancelled = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVis) }
+  }, [isMultiplayer, roomId, isHost, onRoomPlayersUpdate, onGameStartedByHost, players?.length])
+
+  const handleStartMultiplayer = async () => {
+    if (!roomId) return
+    try {
+      await fetch(`/api/room/${roomId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: 'playing', roundIndex: 0 }),
+      })
+    } catch (e) { console.error('Failed to start room', e) }
+    onStart()
+  }
+
+  const copyCode = () => {
+    if (roomId) {
+      navigator.clipboard?.writeText(roomId).catch(() => {})
+      setCodeCopied(true)
+      setTimeout(() => setCodeCopied(false), 2000)
+      haptic?.('success')
+    }
+  }
+
+  const inviteLink = async () => {
+    if (!roomId) return
+    const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, `room_${roomId}`)
+    const text = `Присоединяйся к игре в PartyUp! 🎮 ${game.title} — комната ${roomId}`
+    // Гость — копирует ссылку на комнату; залогиненный — нативный TG share.
+    await doInviteShare({ deeplink, text, gameId: game.id, kind: 'room', evName: 'lobby_invite' })
+  }
+
   return (
     <div>
       {/* Warmup notification */}
@@ -667,10 +2296,10 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
         <div className="warmup-hint">
           <Wind size={16} color="#ff9500" style={{flexShrink:0,marginTop:2}}/>
           <div>
-            <strong>Выбран режим Разогрев</strong>
-            <span>Круто для старта, но выбери другой вайб — и вопросы станут веселее и точнее под вашу компанию!</span>
+            <strong>Разогрев — лёгкий старт</strong>
+            <span>Хочешь острее? Смени вайб прямо сейчас:</span>
             <div style={{marginTop:8,display:'flex',gap:8,flexWrap:'wrap'}}>
-              {VIBES.filter(v => v.id !== 'warmup').slice(0,3).map(v => (
+              {VIBES.filter(v => v.id !== 'warmup' && v.id !== 'adult').slice(0,3).map(v => (
                 <button key={v.id} className="tag" style={{cursor:'pointer'}}
                   onClick={() => { onChangeVibe(v.id); onDismissHint() }}>
                   <VibeIcon vibeId={v.id} size={12}/> {v.label}
@@ -684,63 +2313,75 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
         </div>
       )}
 
-      {/* Game tag */}
-      <div className="lobby-game-tag">
-        <div className="game-icon-token" style={{width:42,height:42,borderRadius:13}}>
-          <GameIcon gameId={game.id} size={20} color="var(--accent-2)"/>
+      {/* Game header — крупная иконка + название, без дубля вайба/раундов */}
+      <div className="lobby-game-tag lobby-game-hero">
+        <div className="game-icon-token lobby-hero-icon">
+          <GameIcon gameId={game.id} size={32} color="var(--accent-2)"/>
         </div>
-        <div style={{flex:1}}>
-          <div style={{fontWeight:700,fontSize:15}}>{game.title}</div>
-          <div style={{color:'var(--muted)',fontSize:12}}>{settings.mode} · Комната {room?.id || 'LOCAL'}</div>
+        <div className="lobby-hero-text">
+          <div className="lobby-hero-title">{game.title}</div>
+          <div className="lobby-hero-sub">{game.short}</div>
         </div>
-        {everyoneReady && <CircleCheck size={20} color="#30d158"/>}
       </div>
+
+      {/* Multiplayer: room code + invite */}
+      {isMultiplayer && roomId && (
+        <div className="mp-room-card">
+          <div className="mp-room-label"><Share2 size={13}/> Код комнаты</div>
+          <div className="mp-room-code mp-room-code-compact" onClick={copyCode} role="button" aria-label="Скопировать код">
+            {roomId}
+            <span className="mp-room-copy-icon">{codeCopied ? <Check size={14}/> : <Copy size={14}/>}</span>
+          </div>
+          {isHost && (
+            <button className="btn-secondary mt-10" style={{width:'100%'}} onClick={inviteLink}>
+              <Send size={15}/> Пригласить
+            </button>
+          )}
+          {!isHost && (
+            <div className="mp-waiting-hint">
+              <Clock size={13}/> Ждём, когда хост начнёт игру…
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Players */}
       <p className="eyebrow" style={{marginBottom:10}}><Users size={12}/> Игроки ({players.length})</p>
       <div className="player-list" role="list">
         {players.map(p => (
-          <button key={p.id} className="player-row" role="listitem"
-            onClick={() => onToggleReady(p.id)} aria-pressed={p.ready}>
-            <div className="player-avatar">{p.emoji}</div>
+          <div key={p.id} className="player-row" role="listitem">
+            <PlayerAvatar player={p} auth={auth} myId={myId} size={40} className="lobby-player-avatar"
+              onClick={() => onPlayerAvatarClick?.(p)}/>
             <div style={{flex:1}}>
-              <div className="player-name">{p.name}{p.isHost && <span className="tag tag-accent" style={{marginLeft:8,fontSize:10}}><Crown size={9}/> Хост</span>}</div>
-              <div className="player-role" style={{fontSize:11,color:'var(--muted)'}}>Нажми чтобы изменить</div>
+              <div className="player-name">{p.name}</div>
             </div>
-            <span className={`ready-badge ${p.ready ? 'yes' : 'no'}`}>{p.ready ? '✓ Готов' : 'Ждём'}</span>
-          </button>
+            {p.isHost
+              ? <span className="ready-badge host"><Crown size={11}/> хост</span>
+              : <span className="ready-badge yes"><Check size={12}/> готов</span>}
+          </div>
         ))}
       </div>
 
-      {/* Share */}
-      <div className="share-block">
-        <UserPlus size={22} color="var(--accent-2)"/>
-        <div style={{flex:1}}>
-          <div style={{fontWeight:600,fontSize:14}}>Позвать друзей</div>
-          <div style={{color:'var(--muted)',fontSize:12}}>Поделись ссылкой в Telegram</div>
+      {/* Settings summary */}
+      <div className="lobby-settings-card">
+        <div className="lobby-settings-row">
+          <span className="lobby-settings-key"><Dices size={12}/> {lobbyCountLabel(game)}</span>
+          <span className="lobby-settings-val">{settings.rounds}</span>
         </div>
-        <button className="btn-ghost" style={{minHeight:34,fontSize:13}}>
-          <Copy size={14}/> Копировать
-        </button>
+        <div className="lobby-settings-row">
+          <span className="lobby-settings-key"><Play size={12}/> Режим</span>
+          <span className="lobby-settings-val">{isMultiplayer ? 'Мультиплеер' : 'Один телефон'}</span>
+        </div>
+        <div className="lobby-settings-row">
+          <span className="lobby-settings-key"><VibeIcon vibeId={currentVibe} size={12}/> Вайб</span>
+          <span className="lobby-settings-val">{VIBES.find(v=>v.id===currentVibe)?.label || 'Разогрев'}</span>
+        </div>
       </div>
 
-      <div className="divider mt-16"/>
-
-      {/* Settings */}
-      <p className="eyebrow" style={{margin:'14px 0 8px'}}><Settings size={12}/> Настройки</p>
-      {[['Режим',settings.mode],['Раундов',settings.rounds],['Приватность',settings.privacy]].map(([k,v]) => (
-        <div key={k} className="lobby-settings-row">
-          <span>{k}</span>
-          <span className="lobby-settings-val">{v}</span>
-        </div>
-      ))}
-
-      <button className="btn-primary mt-20" onClick={onStart} disabled={!everyoneReady}>
-        {everyoneReady ? <><Play size={17}/> Начать раунд</> : <>Ждём готовности…</>}
-      </button>
-      {!everyoneReady && (
-        <button className="btn-secondary mt-10" onClick={onAllReady}>
-          <Check size={16}/> Отметить всех готовыми
+      {/* Start button: only host in multiplayer, everyone in local */}
+      {(!isMultiplayer || isHost) && (
+        <button className="btn-primary mt-20" onClick={isMultiplayer ? handleStartMultiplayer : onStart}>
+          <Play size={17}/> Начать игру
         </button>
       )}
     </div>
@@ -748,6 +2389,42 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
 }
 
 /* ─── Shared Round Utilities ─────────────────────────────────────────────── */
+// Универсальная аватарка игрока: TG-фото если игрок — это сам залогиненный юзер,
+// иначе эмодзи. При клике — в профиль (либо переход на чужой TG-аккаунт).
+function PlayerAvatar({ player, auth, onClick, className = '', size = 56, myId = null }) {
+  // «Свой» игрок определяется ТРЕМЯ способами (в порядке надёжности):
+  //   1) Прямое совпадение по myId (player.id === myId) — самый точный,
+  //      потому что myId выставлен в App при createLobby/auth.
+  //   2) Совпадение по tg-id (для мультиплеера/синхронизации с сервером).
+  //   3) В локальной игре — host = я (т.к. добавленных игроков нет в TG).
+  const myTgId = (auth?.mode === 'telegram')
+    ? (auth?.tgUser?.id ?? auth?.user?.tg_id ?? null)
+    : null
+  const isMeById = myId && player?.id && String(player.id) === String(myId)
+  const isMeByTg = !!myTgId && (
+    (player?.telegramId != null && player.telegramId === myTgId) ||
+    (player?.userId != null && player.userId === myTgId) ||
+    (player?.id && String(player.id) === `tg_${myTgId}`)
+  )
+  const isMe = isMeById || isMeByTg
+  // Фото показываем ВСЕМ, у кого оно есть на сервере (player.photo_url).
+  // Если это я и сервер ещё не успел синкнуть — fallback на свой auth.
+  const photo = player?.photo_url || (isMe ? avatarUrl(auth) : null)
+  return (
+    <button
+      type="button"
+      className={`active-player-emoji ${className}`}
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.5) }}
+      onClick={onClick}
+      aria-label={`Профиль ${player?.name || 'игрока'}`}
+    >
+      {photo
+        ? <img src={photo} alt="" referrerPolicy="no-referrer"/>
+        : <span>{player?.emoji || '🎮'}</span>}
+    </button>
+  )
+}
+
 function RoundHeader({ game, roundIndex, total }) {
   return (
     <>
@@ -762,8 +2439,16 @@ function RoundHeader({ game, roundIndex, total }) {
   )
 }
 
-function NextRoundBtn({ roundIndex, total, onNext, onEnd }) {
+function NextRoundBtn({ roundIndex, total, onNext, onEnd, isMultiplayer, isHost }) {
   const isLast = roundIndex >= total - 1
+  // In multiplayer, only host can advance; non-host players see a waiting message
+  if (isMultiplayer && !isHost) {
+    return (
+      <div className="mp-waiting-hint mt-16">
+        <Clock size={13}/> Ждём следующий раунд от хоста…
+      </div>
+    )
+  }
   return (
     <button className="btn-primary no-pulse mt-16" onClick={isLast ? onEnd : onNext}>
       {isLast ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
@@ -772,8 +2457,49 @@ function NextRoundBtn({ roundIndex, total, onNext, onEnd }) {
 }
 
 /* ─── RoundScreen dispatcher ─────────────────────────────────────────────── */
-function RoundScreen({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
-  const props = { game, round, roundIndex, total, players, onNext, onEnd, haptic }
+function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId }) {
+  // Мультиплеер-поллинг (адаптивный):
+  // • если игрок в комнате один — поллинг не нужен (некому что-то менять);
+  // • вкладка скрыта — пауза;
+  // • If-None-Match → 304 без тела, если ничего не менялось;
+  // • при сетевой смене раунда — сразу же делаем ещё один poll, не ждём интервал.
+  useEffect(() => {
+    if (!isMultiplayer || !roomId) return
+    if ((players?.length ?? 1) <= 1) return // соло-тест: не дёргаем DO вообще
+    let cancelled = false
+    let timer = null
+    let lastSig = ''
+    let lastEtag = null
+    const poll = async () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
+      try {
+        const headers = lastEtag ? { 'If-None-Match': lastEtag } : undefined
+        const res = await fetch(`/api/room/${roomId}`, { headers })
+        if (cancelled) return
+        if (res.status === 304) { schedule(); return }
+        if (!res.ok) { schedule(); return }
+        const et = res.headers.get('etag'); if (et) lastEtag = et
+        const serverRoom = await res.json()
+        if (serverRoom.state === 'ended') { onGameEnded?.(); return }
+        if (serverRoom.roundIndex > roundIndex) { onRoundSync?.(serverRoom.roundIndex); return }
+        if (serverRoom.roundIndex < roundIndex) { schedule(); return }
+        const sig = serverRoom.round ? `${serverRoom.round.choice}|${serverRoom.round.pickedAt}` : 'null'
+        if (sig !== lastSig) { lastSig = sig; onRoundStateSync?.(serverRoom.round || null) }
+      } catch {}
+      schedule()
+    }
+    const schedule = () => {
+      if (cancelled) return
+      timer = setTimeout(poll, 2000) // 2 c когда играем вдвоём+, в 2 раза реже чем было
+    }
+    poll()
+    const onVis = () => { if (!document.hidden) { if (timer) clearTimeout(timer); poll() } }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { cancelled = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVis) }
+  }, [isMultiplayer, roomId, roundIndex, onRoundSync, onGameEnded, onRoundStateSync, players?.length])
+
+  const props = { game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, auth, onAvatarClick, roomId, roomRoundState, onRoundStateSync, myId }
   switch (game.roundType) {
     case 'truth_dare':   return <TruthOrDareRound {...props} />
     case 'never_have_i': return <NeverHaveIRound {...props} />
@@ -785,61 +2511,191 @@ function RoundScreen({ game, round, roundIndex, total, players, onNext, onEnd, h
     case 'who_am_i':     return <WhoAmIRound {...props} />
     case 'fact_guess':   return <FactGuessRound {...props} />
     case 'meme_battle':  return <MemeBattleRound {...props} />
+    case 'crocodile':    return <CrocodileRound {...props} />
+    case 'taboo':        return <TabooRound {...props} />
+    case 'hot_seat':     return <HotSeatRound {...props} />
+    case 'associations': return <AssociationsRound {...props} />
     default:             return <GenericRound {...props} />
   }
 }
 
 /* ─── TruthOrDareRound ───────────────────────────────────────────────────── */
-function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
-  const [choice, setChoice] = useState(null) // null | 'truth' | 'dare'
+function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic, auth, onAvatarClick, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, recordActiveMs, myId }) {
   const activePlayer = players[roundIndex % players.length]
 
-  const truthPrompts = game.samplePrompts.filter(p => p.type === 'Правда')
-  const darePrompts = game.samplePrompts.filter(p => p.type === 'Действие')
-  const [shownPrompt, setShownPrompt] = useState(null)
+  // ── Определяем «мой ход» (multi-source проверка) ──
+  // 1) по myId (стабильный локальный идентификатор игрока)
+  // 2) по telegramId/userId (если apparent совпадение по TG-аккаунту)
+  const myTgId = (auth?.mode === 'telegram') ? (auth?.tgUser?.id ?? auth?.user?.tg_id ?? null) : null
+  const isMyTurn = useMemo(() => {
+    if (!isMultiplayer) return true
+    if (myId && activePlayer?.id && String(activePlayer.id) === String(myId)) return true
+    if (myTgId != null && (
+      activePlayer?.telegramId === myTgId || activePlayer?.userId === myTgId
+    )) return true
+    return false
+  }, [isMultiplayer, myId, myTgId, activePlayer?.id, activePlayer?.telegramId, activePlayer?.userId])
 
-  const pick = (type) => {
+  const vibeFiltered = useMemo(
+    () => filterPromptsByVibe(game.samplePrompts, round.vibe || 'warmup'),
+    [game.samplePrompts, round.vibe]
+  )
+  const truthPrompts = vibeFiltered.filter(p => p.type === 'Правда')
+  const darePrompts = vibeFiltered.filter(p => p.type === 'Действие')
+
+  // ── State ──
+  // localChoice/localPrompt — single-player only.
+  // В мультиплеере источник истины = roomRoundState (приходит из сервера/оптимистично).
+  const [localChoice, setLocalChoice] = useState(null)
+  const [localPrompt, setLocalPrompt] = useState(null)
+  // Блокировка повторных нажатий пока идёт сетевой запрос.
+  const [busy, setBusy] = useState(false)
+
+  const choice = isMultiplayer ? (roomRoundState?.choice || null) : localChoice
+  const shownPrompt = isMultiplayer
+    ? (roomRoundState?.choice ? { type: roomRoundState.promptType, text: roomRoundState.promptText } : null)
+    : localPrompt
+
+  // Сбрасываем локальное состояние при смене раунда (важно для одноплеера и как safety-net).
+  useEffect(() => {
+    setLocalChoice(null); setLocalPrompt(null); setBusy(false)
+  }, [roundIndex])
+
+  // Замер времени активного хода.
+  const turnStartRef = useRef(Date.now())
+  useEffect(() => { turnStartRef.current = Date.now() }, [roundIndex])
+
+  // Shuffled bags по типам — отдаём карточку без повторов, пока не пройдёт весь
+  // пул; затем перемешиваем заново. Сбрасываем при смене вайба.
+  const bagsRef = useRef({ truth: [], dare: [], vibeKey: '' })
+  const drawFromBag = (type) => {
     const pool = type === 'truth' ? truthPrompts : darePrompts
-    const p = pool[Math.floor(Math.random() * pool.length)]
-    setShownPrompt(p)
-    setChoice(type)
-    haptic('impact')
+    if (!pool.length) return null
+    const vibeKey = `${round.vibe || 'warmup'}|${pool.length}`
+    if (bagsRef.current.vibeKey !== vibeKey) {
+      bagsRef.current = { truth: [], dare: [], vibeKey }
+    }
+    let bag = bagsRef.current[type]
+    if (!bag || bag.length === 0) {
+      bag = pool.map((_, i) => i)
+      for (let i = bag.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [bag[i], bag[j]] = [bag[j], bag[i]]
+      }
+      bagsRef.current[type] = bag
+    }
+    return pool[bag.pop()]
   }
 
-  const handleNext = () => { setChoice(null); setShownPrompt(null); onNext() }
+  // ── Выбор Правда/Действие ──
+  const pick = async (type) => {
+    if (!isMyTurn || busy || choice) return
+    const pool = type === 'truth' ? truthPrompts : darePrompts
+    if (!pool.length) return
+    const p = drawFromBag(type) || pool[Math.floor(Math.random() * pool.length)]
+    haptic('impact')
+    if (isMultiplayer && roomId) {
+      const optimistic = {
+        choice: type,
+        promptType: p?.type || (type === 'truth' ? 'Правда' : 'Действие'),
+        promptText: p?.text || '',
+        pickedBy: activePlayer.id,
+        pickedAt: Date.now(),
+      }
+      // Моментальный локальный отклик — карточка появляется сразу.
+      onRoundStateSync?.(optimistic)
+      setBusy(true)
+      try { await api.roomAction(roomId, { round: optimistic }) } catch {}
+      setBusy(false)
+    } else {
+      setLocalChoice(type); setLocalPrompt(p)
+    }
+  }
+
+  // ── Завершение хода (следующий раунд) ──
+  const handleNext = async () => {
+    if (!isMyTurn || busy) return
+    const ms = Math.max(0, Date.now() - (turnStartRef.current || Date.now()))
+    if (isMultiplayer && roomId && activePlayer?.id) {
+      setBusy(true)
+      // Локально мгновенно сбрасываем round-state — больше не показываем карточку.
+      onRoundStateSync?.(null)
+      try {
+        // Одним запросом: фиксируем время хода + чистим round.
+        await api.roomAction(roomId, {
+          playerTime: { playerId: activePlayer.id, ms },
+          round: null,
+        })
+      } catch {}
+      // onNext (App.nextRound) сам отправит roundIndex на сервер — теперь это
+      // делает ЛЮБОЙ клиент (не только хост), что чинит синк, когда активный — не хост.
+      onNext()
+      setBusy(false)
+      return
+    }
+    if (recordActiveMs && activePlayer?.id) recordActiveMs(activePlayer.id, ms)
+    setLocalChoice(null); setLocalPrompt(null)
+    onNext()
+  }
 
   return (
     <div>
       <RoundHeader game={game} roundIndex={roundIndex} total={total} />
       <div className="active-player-banner">
-        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <PlayerAvatar player={activePlayer} auth={auth} myId={myId} size={64}
+          onClick={() => onAvatarClick?.(activePlayer)}/>
         <div>
           <div className="active-player-name">{activePlayer.name}</div>
-          <div className="active-player-sub">выбирает</div>
+          <div className="active-player-sub">{isMyTurn ? 'твой ход' : 'сейчас ходит'}</div>
         </div>
       </div>
 
       {!choice ? (
         <div className="td-choice-grid">
-          <button className="td-choice-btn td-truth" onClick={() => pick('truth')}>
+          <button
+            type="button"
+            className={`td-choice-btn td-truth ${!isMyTurn ? 'is-locked' : ''}`}
+            disabled={!isMyTurn || busy}
+            aria-disabled={!isMyTurn || busy}
+            onClick={() => pick('truth')}>
             <Target size={32}/>
             <span>Правда</span>
-            <span className="td-choice-hint">Честный ответ</span>
+            <span className="td-choice-hint">{isMyTurn ? 'Честный ответ' : 'Ждём ход'}</span>
           </button>
-          <button className="td-choice-btn td-dare" onClick={() => pick('dare')}>
+          <button
+            type="button"
+            className={`td-choice-btn td-dare ${!isMyTurn ? 'is-locked' : ''}`}
+            disabled={!isMyTurn || busy}
+            aria-disabled={!isMyTurn || busy}
+            onClick={() => pick('dare')}>
             <Flame size={32}/>
             <span>Действие</span>
-            <span className="td-choice-hint">Задание</span>
+            <span className="td-choice-hint">{isMyTurn ? 'Задание' : 'Ждём ход'}</span>
           </button>
         </div>
       ) : (
-        <div className="prompt-card" style={{textAlign:'center'}}>
+        <div className="prompt-card prompt-card-reveal" style={{textAlign:'center'}}>
           <div className="prompt-type"><Sparkles size={12}/> {shownPrompt?.type}</div>
           <div className="prompt-text">{shownPrompt?.text}</div>
         </div>
       )}
 
-      {choice && <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>}
+      {choice && isMyTurn && (
+        <button
+          type="button"
+          className="btn-primary no-pulse mt-16"
+          disabled={busy}
+          onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
+          {roundIndex >= total - 1
+            ? <><Trophy size={17}/> Итоги</>
+            : <><ChevronRight size={17}/> Следующий</>}
+        </button>
+      )}
+      {choice && !isMyTurn && (
+        <div className="mp-waiting-hint" style={{marginTop: 16}}>
+          <Clock size={14}/> Ждём «Следующий» от {activePlayer.name}
+        </div>
+      )}
     </div>
   )
 }
@@ -951,7 +2807,7 @@ function WhoOfUsRound(props) { return <VoteRound {...props} /> }
 function MostLikelyRound(props) { return <VoteRound {...props} /> }
 
 /* ─── FiveSecondsRound ───────────────────────────────────────────────────── */
-function FiveSecondsRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+function FiveSecondsRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic }) {
   const [phase, setPhase] = useState('ready') // 'ready' | 'countdown' | 'done'
   const [count, setCount] = useState(5)
   const activePlayer = players[roundIndex % players.length]
@@ -964,7 +2820,16 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, onNext, onE
   }, [phase, count, haptic])
 
   const start = () => { setCount(5); setPhase('countdown'); haptic('impact') }
-  const handleNext = () => { setPhase('ready'); setCount(5); onNext() }
+
+  const handleSuccess = () => {
+    haptic('success')
+    recordRoundScore?.({ [activePlayer.id]: 1 })
+    setPhase('ready'); setCount(5); onNext()
+  }
+  const handleFail = () => {
+    haptic('impact')
+    setPhase('ready'); setCount(5); onNext()
+  }
 
   return (
     <div>
@@ -996,9 +2861,19 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, onNext, onE
       {phase === 'done' && (
         <>
           <div className="five-done-banner">
-            <Trophy size={20}/> Время вышло!
+            <Timer size={20}/> Время вышло!
           </div>
-          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+          <p style={{textAlign:'center', color:'var(--muted)', fontSize:13, marginTop:8, marginBottom:4}}>
+            {activePlayer.name} успел(а) назвать три?
+          </p>
+          <div className="five-result-btns">
+            <button className="five-btn-success" onClick={handleSuccess}>
+              <Check size={20}/> Успел!
+            </button>
+            <button className="five-btn-fail" onClick={handleFail}>
+              <X size={20}/> Не успел
+            </button>
+          </div>
         </>
       )}
     </div>
@@ -1228,9 +3103,12 @@ function AliasRound({ game, round, roundIndex, total, players, onNext, onEnd, ha
 }
 
 /* ─── WhoAmIRound ────────────────────────────────────────────────────────── */
-function WhoAmIRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
-  const [phase, setPhase] = useState('setup') // 'setup' | 'playing'
+function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('setup') // 'setup' | 'playing' | 'guessed'
   const [qCount, setQCount] = useState(0)
+  const [guessInput, setGuessInput] = useState('')
+  const [wrongGuess, setWrongGuess] = useState(false)
+  const [earnedPts, setEarnedPts] = useState(0)
   const activePlayer = players[roundIndex % players.length]
   const character = round.promptText
 
@@ -1238,8 +3116,35 @@ function WhoAmIRound({ game, round, roundIndex, total, players, onNext, onEnd, h
     haptic(ans === 'yes' ? 'impact' : 'selection')
     setQCount(c => c + 1)
   }
-  const handleGuessed = () => { haptic('success'); onNext() }
-  const handleNext = () => { setPhase('setup'); setQCount(0); onNext() }
+
+  const submitGuess = () => {
+    const guess = guessInput.trim().toLowerCase()
+    const target = character.toLowerCase()
+    // Fuzzy match: exact, or guess is contained in target, or target in guess
+    const correct = guess === target
+      || target.includes(guess)
+      || guess.includes(target.split(' ')[0]) // match first word for multi-word names
+    if (correct) {
+      haptic('success')
+      const pts = Math.max(1, 10 - Math.floor(qCount / 2))
+      setEarnedPts(pts)
+      recordRoundScore?.({ [activePlayer.id]: pts })
+      setPhase('guessed')
+    } else {
+      haptic('error')
+      setWrongGuess(true)
+      setTimeout(() => setWrongGuess(false), 900)
+    }
+  }
+
+  const handleGuessedManual = () => {
+    haptic('success')
+    recordRoundScore?.({ [activePlayer.id]: 1 })
+    setEarnedPts(1)
+    setPhase('guessed')
+  }
+
+  const handleNext = () => { setPhase('setup'); setQCount(0); setGuessInput(''); setEarnedPts(0); onNext() }
 
   return (
     <div>
@@ -1283,9 +3188,36 @@ function WhoAmIRound({ game, round, roundIndex, total, players, onNext, onEnd, h
             <button className="whoami-btn-no" onClick={() => handleAnswer('no')}><X size={22}/> Нет</button>
           </div>
 
-          <button className="btn-secondary mt-12" onClick={handleGuessed}>
-            <CircleCheck size={16}/> Угадал(а)!
+          <div className={`whoami-guess-row ${wrongGuess ? 'wrong-shake' : ''}`}>
+            <input
+              className="whoami-guess-input"
+              placeholder="Введи догадку…"
+              value={guessInput}
+              onChange={e => setGuessInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submitGuess()}
+            />
+            <button className="whoami-guess-btn" onClick={submitGuess} disabled={!guessInput.trim()}>
+              <CircleCheck size={18}/>
+            </button>
+          </div>
+
+          <button className="btn-ghost mt-10" style={{width:'100%',justifyContent:'center',fontSize:13}}
+            onClick={handleGuessedManual}>
+            <CircleCheck size={14}/> Угадал(а) устно — засчитать очко
           </button>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+
+      {phase === 'guessed' && (
+        <>
+          <div className="whoami-guessed-card">
+            <div className="whoami-guessed-icon">🎉</div>
+            <div className="whoami-guessed-name">{character}</div>
+            <div style={{fontSize:13,color:'var(--muted)',marginTop:6}}>
+              За {qCount} вопросов · +{earnedPts} {earnedPts === 1 ? 'очко' : 'очков'}
+            </div>
+          </div>
           <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
         </>
       )}
@@ -1571,78 +3503,970 @@ function GenericRound({ game, round, roundIndex, total, players, onNext, onEnd, 
   )
 }
 
+/* ─── CrocodileRound ─────────────────────────────────────────────────────── */
+function CrocodileRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('ready') // 'ready' | 'playing' | 'result'
+  const [timeLeft, setTimeLeft] = useState(60)
+  const activePlayer = players[roundIndex % players.length]
+
+  useEffect(() => {
+    if (phase !== 'playing') return
+    if (timeLeft <= 0) { setPhase('result'); haptic('success'); return }
+    const t = setTimeout(() => setTimeLeft(s => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [phase, timeLeft, haptic])
+
+  const start = () => { setPhase('playing'); setTimeLeft(60); haptic('impact') }
+
+  const handleGuessed = () => {
+    haptic('success')
+    recordRoundScore?.({ [activePlayer.id]: 2 })
+    setPhase('ready'); setTimeLeft(60); onNext()
+  }
+  const handleMissed = () => {
+    haptic('impact')
+    setPhase('ready'); setTimeLeft(60); onNext()
+  }
+
+  const urgentTime = timeLeft <= 10
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">показывает</div>
+        </div>
+      </div>
+
+      {phase === 'ready' && (
+        <>
+          <div className="prompt-card" style={{textAlign:'center'}}>
+            <div className="prompt-type"><Brain size={12}/> Слово для показа</div>
+            <div className="prompt-text">{round.promptText}</div>
+            <p style={{fontSize:13,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>
+              Только жесты и мимика — ни слова!<br/>Остальные угадывают.
+            </p>
+          </div>
+          <button className="btn-primary mt-16" onClick={start}><Play size={17}/> Поехали! (60 сек)</button>
+        </>
+      )}
+
+      {phase === 'playing' && (
+        <>
+          <div className={`alias-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}с</div>
+          <div className="crocodile-word-display">
+            <div className="crocodile-word">{round.promptText}</div>
+            <div className="crocodile-hint">Показывай, не говори!</div>
+          </div>
+        </>
+      )}
+
+      {phase === 'result' && (
+        <>
+          <div className="five-done-banner"><Timer size={20}/> Время вышло!</div>
+          <p style={{textAlign:'center',color:'var(--muted)',fontSize:14,marginTop:8,marginBottom:4}}>
+            Компания угадала «<strong>{round.promptText}</strong>»?
+          </p>
+          <div className="five-result-btns">
+            <button className="five-btn-success" onClick={handleGuessed}><Check size={20}/> Угадали!</button>
+            <button className="five-btn-fail" onClick={handleMissed}><X size={20}/> Не угадали</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── TabooRound ─────────────────────────────────────────────────────────── */
+function TabooRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('ready') // 'ready' | 'playing' | 'result'
+  const [timeLeft, setTimeLeft] = useState(60)
+  const [buzzerPressed, setBuzzerPressed] = useState(false)
+  const activePlayer = players[roundIndex % players.length]
+  const prompt = round.promptData
+  const forbidden = prompt?.forbidden || []
+  // Extract word from text (e.g. '☕ КОФЕ' → 'КОФЕ')
+  const wordDisplay = prompt?.text || round.promptText
+
+  useEffect(() => {
+    if (phase !== 'playing') return
+    if (timeLeft <= 0) { setPhase('result'); haptic('success'); return }
+    const t = setTimeout(() => setTimeLeft(s => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [phase, timeLeft, haptic])
+
+  const start = () => { setPhase('playing'); setTimeLeft(60); setBuzzerPressed(false); haptic('impact') }
+
+  const handleTaboo = () => {
+    haptic('error')
+    setBuzzerPressed(true)
+    setPhase('result')
+  }
+
+  const handleGuessed = () => {
+    haptic('success')
+    recordRoundScore?.({ [activePlayer.id]: 2 })
+    setPhase('ready'); setTimeLeft(60); setBuzzerPressed(false); onNext()
+  }
+  const handleMissed = () => {
+    haptic('impact')
+    setPhase('ready'); setTimeLeft(60); setBuzzerPressed(false); onNext()
+  }
+
+  const urgentTime = timeLeft <= 10
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <span className="active-player-emoji">{activePlayer.emoji}</span>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">объясняет</div>
+        </div>
+      </div>
+
+      {phase === 'ready' && (
+        <>
+          <div className="taboo-card">
+            <div className="taboo-word">{wordDisplay}</div>
+            <div className="taboo-forbidden-label"><X size={12}/> Нельзя говорить:</div>
+            <div className="taboo-forbidden-list">
+              {forbidden.map((w, i) => (
+                <span key={i} className="taboo-forbidden-chip">{w}</span>
+              ))}
+            </div>
+          </div>
+          <p style={{fontSize:13,color:'var(--muted)',textAlign:'center',marginTop:10,lineHeight:1.5}}>
+            Объясни слово — не называя запрещённые слова.<br/>Остальные следят и жмут ТАБУ!
+          </p>
+          <button className="btn-primary mt-12" onClick={start}><Play size={17}/> Старт (60 сек)</button>
+        </>
+      )}
+
+      {phase === 'playing' && (
+        <>
+          <div className={`alias-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}с</div>
+          <div className="taboo-card taboo-card-playing">
+            <div className="taboo-word">{wordDisplay}</div>
+            <div className="taboo-forbidden-label"><X size={12}/> Табу:</div>
+            <div className="taboo-forbidden-list">
+              {forbidden.map((w, i) => (
+                <span key={i} className="taboo-forbidden-chip">{w}</span>
+              ))}
+            </div>
+          </div>
+          <button className="taboo-buzzer-btn" onClick={handleTaboo}>
+            <Siren size={22}/> ТАБУ!
+          </button>
+        </>
+      )}
+
+      {phase === 'result' && (
+        <>
+          {buzzerPressed ? (
+            <div className="taboo-buzzer-result">
+              <div className="taboo-buzzer-icon">🚨</div>
+              <div className="taboo-buzzer-title">ТАБУ сказано!</div>
+              <div style={{fontSize:13,color:'var(--muted)',marginTop:4}}>Слово сгорело. Следующее!</div>
+            </div>
+          ) : (
+            <div className="five-done-banner"><Timer size={20}/> Время вышло!</div>
+          )}
+          <p style={{textAlign:'center',color:'var(--muted)',fontSize:14,marginTop:12,marginBottom:4}}>
+            Команда угадала слово?
+          </p>
+          <div className="five-result-btns">
+            <button className="five-btn-success" onClick={handleGuessed}><Check size={20}/> Угадали!</button>
+            <button className="five-btn-fail" onClick={handleMissed}><X size={20}/> {buzzerPressed ? 'Не успели' : 'Нет'}</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── HotSeatRound ───────────────────────────────────────────────────────── */
+function HotSeatRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+  const [answered, setAnswered] = useState(false)
+  const [reaction, setReaction] = useState(null)
+  const activePlayer = players[roundIndex % players.length]
+
+  const handleNext = () => { setAnswered(false); setReaction(null); onNext() }
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      <div className="hot-seat-banner">
+        <div className="hot-seat-fire" aria-hidden="true">🔥</div>
+        <div className="hot-seat-player-row">
+          <span className="hot-seat-emoji">{activePlayer.emoji}</span>
+          <div>
+            <div className="hot-seat-name">{activePlayer.name}</div>
+            <div className="hot-seat-sub">на горячем стуле</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="prompt-card">
+        <div className="prompt-type"><Flame size={12}/> Вопрос</div>
+        <div className="prompt-text">{round.promptText}</div>
+      </div>
+
+      {!answered ? (
+        <button className="btn-primary mt-16" onClick={() => { setAnswered(true); haptic('impact') }}>
+          <Check size={17}/> Ответил(а)!
+        </button>
+      ) : (
+        <>
+          <div className="reactions-row" role="group" aria-label="Реакции">
+            {['🔥','😂','😳','💀','👏'].map(r => (
+              <button key={r} className={`reaction-btn ${reaction === r ? 'tapped' : ''}`}
+                onClick={() => { setReaction(r); haptic() }} aria-pressed={reaction === r}>{r}</button>
+            ))}
+          </div>
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── AssociationsRound ──────────────────────────────────────────────────── */
+function AssociationsRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic }) {
+  const [phase, setPhase] = useState('show') // 'show' | 'collect' | 'reveal'
+  const [assocInputIdx, setAssocInputIdx] = useState(0)
+  const [associations, setAssociations] = useState({}) // { playerId: string }
+  const [currentInput, setCurrentInput] = useState('')
+
+  const submitAssociation = () => {
+    if (!currentInput.trim()) return
+    const p = players[assocInputIdx]
+    setAssociations(a => ({ ...a, [p.id]: currentInput.trim() }))
+    setCurrentInput('')
+    if (assocInputIdx < players.length - 1) {
+      setAssocInputIdx(i => i + 1)
+    } else {
+      // Calculate matches
+      const vals = Object.values({ ...associations, [p.id]: currentInput.trim() })
+      const scores = {}
+      vals.forEach((v, i) => {
+        vals.forEach((v2, j) => {
+          if (i !== j && v.toLowerCase() === v2.toLowerCase()) {
+            scores[players[i].id] = (scores[players[i].id] || 0) + 1
+          }
+        })
+      })
+      if (Object.keys(scores).length > 0) {
+        recordRoundScore?.(scores)
+      }
+      setPhase('reveal')
+    }
+    haptic('impact')
+  }
+
+  const handleNext = () => {
+    setPhase('show'); setAssocInputIdx(0); setAssociations({}); setCurrentInput(''); onNext()
+  }
+
+  const currentInputPlayer = players[assocInputIdx]
+
+  // Count matches
+  const assocValues = Object.values(associations)
+  const allSubmitted = Object.keys(associations).length >= players.length
+  const matchGroups = allSubmitted
+    ? assocValues.reduce((acc, v) => {
+        const key = v.toLowerCase()
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+    : {}
+  const matchCount = Object.values(matchGroups).filter(c => c > 1).reduce((s, c) => s + c, 0)
+
+  return (
+    <div>
+      <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+
+      {phase === 'show' && (
+        <>
+          <div className="assoc-trigger-card">
+            <div className="prompt-type"><Sparkles size={12}/> Слово-триггер</div>
+            <div className="assoc-word">{round.promptText}</div>
+            <p style={{fontSize:13,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>
+              Каждый по очереди называет одну ассоциацию.<br/>
+              Совпали — оба получают очко!
+            </p>
+          </div>
+          <button className="btn-primary mt-16" onClick={() => setPhase('collect')}>
+            <Play size={17}/> Начать!
+          </button>
+        </>
+      )}
+
+      {phase === 'collect' && (
+        <>
+          <div className="assoc-trigger-card" style={{marginBottom:12}}>
+            <div className="prompt-type"><Sparkles size={12}/> Слово-триггер</div>
+            <div className="assoc-word" style={{fontSize:26}}>{round.promptText}</div>
+          </div>
+
+          <div className="active-player-banner">
+            <span className="active-player-emoji">{currentInputPlayer.emoji}</span>
+            <div>
+              <div className="active-player-name">{currentInputPlayer.name}</div>
+              <div className="active-player-sub">пишет ассоциацию</div>
+            </div>
+          </div>
+
+          <div className="whoami-guess-row" style={{marginTop:12}}>
+            <input
+              className="whoami-guess-input"
+              placeholder="Ассоциация…"
+              value={currentInput}
+              onChange={e => setCurrentInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submitAssociation()}
+              autoFocus
+            />
+            <button className="whoami-guess-btn" onClick={submitAssociation} disabled={!currentInput.trim()}>
+              <Check size={18}/>
+            </button>
+          </div>
+
+          <div className="fact-player-dots" style={{marginTop:12,justifyContent:'center'}}>
+            {players.map((_, i) => (
+              <div key={i} className={`fact-dot ${i < assocInputIdx ? 'done' : i === assocInputIdx ? 'current' : ''}`}/>
+            ))}
+          </div>
+        </>
+      )}
+
+      {phase === 'reveal' && (
+        <>
+          <div className="assoc-trigger-card" style={{marginBottom:14}}>
+            <div className="prompt-type"><Sparkles size={12}/> Слово-триггер</div>
+            <div className="assoc-word" style={{fontSize:22}}>{round.promptText}</div>
+          </div>
+          <div className="assoc-reveal-list">
+            {players.map(p => (
+              <div key={p.id} className={`assoc-reveal-row ${matchGroups[associations[p.id]?.toLowerCase()] > 1 ? 'is-match' : ''}`}>
+                <span className="assoc-player-emoji">{p.emoji}</span>
+                <span className="assoc-player-name">{p.name}</span>
+                <span className="assoc-player-word">{associations[p.id] || '—'}</span>
+                {matchGroups[associations[p.id]?.toLowerCase()] > 1 && <span className="assoc-match-badge">✓ Совпало!</span>}
+              </div>
+            ))}
+          </div>
+          {matchCount > 0 && (
+            <div className="assoc-match-summary">
+              🎉 {matchCount} совпадений — молодцы!
+            </div>
+          )}
+          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ─── JoinRoomScreen ─────────────────────────────────────────────────────── */
+function JoinRoomScreen({ roomId, myPlayerId, onJoined, onBack, haptic, defaultName }) {
+  // Имя берём по приоритету: TG-display / анон-ник > сохранённое > пусто.
+  // 'Вы' считаем плейсхолдером (placeholder в инпуте), а не реальным именем.
+  const PLACEHOLDER = 'Вы'
+  const clean = (s) => {
+    const x = sanitizeName(s || '', 32)
+    return x === PLACEHOLDER ? '' : x
+  }
+  const initial = clean(defaultName) ||
+                  clean((typeof window !== 'undefined' && localStorage.getItem('pu_my_name')) || '')
+  const [name, setName] = useState(initial)
+  const editedRef = useRef(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const autoJoinedRef = useRef(false)
+
+  // При получении актуального defaultName — обновляем поле, если юзер не правил.
+  useEffect(() => {
+    const real = clean(defaultName)
+    if (!real || editedRef.current) return
+    setName(real)
+  }, [defaultName])
+
+  const performJoin = async (rawName) => {
+    const cleaned = sanitizeName(rawName, 32)
+    if (!cleaned) { setError('Введите имя'); return }
+    setLoading(true)
+    setError(null)
+    try {
+      const playerEmoji = ['🎉','🎮','🔥','✨','🌟','🎯','🦊','🎧'][Math.floor(Math.random() * 8)]
+      try { localStorage.setItem('pu_my_name', cleaned) } catch {}
+      const tgU = tgUser()
+      const res = await fetch(`/api/room/${roomId}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: myPlayerId, name: cleaned, emoji: playerEmoji,
+          userId: tgU?.id || null, telegramId: tgU?.id || null,
+          photo_url: tgU?.photo_url || null, username: tgU?.username || null,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        setError(err.error === 'game_already_started' ? 'Игра уже началась' : 'Не удалось войти в комнату')
+        setLoading(false)
+        return
+      }
+      const room = await res.json()
+      haptic?.('success')
+      onJoined(room, cleaned)
+    } catch (e) {
+      setError('Ошибка подключения. Попробуй снова.')
+      setLoading(false)
+    }
+  }
+
+  const handleJoin = () => performJoin(name)
+
+  // Авто-join: если имя уже известно (auth/localStorage) — заходим в лобби сразу.
+  useEffect(() => {
+    if (autoJoinedRef.current) return
+    const ready = clean(defaultName) ||
+                  clean((typeof window !== 'undefined' && localStorage.getItem('pu_my_name')) || '')
+    if (ready) {
+      autoJoinedRef.current = true
+      performJoin(ready)
+    }
+  }, [defaultName]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div>
+      <p className="eyebrow"><Share2 size={13}/> Мультиплеер</p>
+      <h2 style={{marginBottom:6}}>Присоединиться</h2>
+      <p className="lead" style={{marginBottom:20}}>Комната: <strong>{roomId}</strong></p>
+
+      <div className="setup-player-list">
+        <div className="setup-player-row">
+          <div className="setup-player-emoji">🎮</div>
+          <input
+            className="setup-player-input"
+            value={name}
+            onChange={e => { editedRef.current = true; setName(sanitizeName(e.target.value, 32)) }}
+            onKeyDown={e => e.key === 'Enter' && handleJoin()}
+            placeholder="Ваше имя"
+            maxLength={32}
+            autoFocus={!name}
+            disabled={loading}
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="mp-error-hint">
+          <X size={14}/> {error}
+        </div>
+      )}
+
+      <button className="btn-primary mt-16" onClick={handleJoin} disabled={loading || !name.trim()}>
+        {loading ? 'Подключение…' : <><UserPlus size={17}/> Войти в комнату</>}
+      </button>
+      <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
+        <ArrowLeft size={15}/> Назад
+      </button>
+    </div>
+  )
+}
+
 /* ─── ResultsScreen ──────────────────────────────────────────────────────── */
-function ResultsScreen({ game, players, shared, setShared, onAgain, onHome }) {
-  const results = [
-    { medal:'🏆', label:'Герой раунда', value:`${players[0]?.emoji} ${players[0]?.name}` },
-    { medal:'😂', label:'Самый смешной', value:`${players[1]?.emoji} ${players[1]?.name||'—'}` },
-    { medal:'🎯', label:'Лучший вопрос', value:`${players[2]?.emoji} ${players[2]?.name||'—'}` },
-  ]
+// «Титулы» вместо победителя — для игр без явных очков (Truth, Hot Seat и т.п.).
+// Считаем по активному времени и количеству ходов каждого игрока.
+function TitlesBoard({ players, game }) {
+  const withMs = players.map(p => ({
+    ...p,
+    activeMs: Number(p.activeMs || 0),
+  }))
+  const totalMs = withMs.reduce((s, p) => s + p.activeMs, 0)
+  // Если активного времени совсем нет — fallback на «герои вечера» по индексам.
+  if (totalMs === 0 || withMs.length === 0) {
+    const labels = ['🎉 Герой вечера', '😂 Душа компании', '🎯 Главный участник']
+    return (
+      <div className="titles-grid">
+        {withMs.slice(0, Math.min(3, withMs.length)).map((p, i) => (
+          <div key={p.id} className="title-card">
+            <div className="title-name">{p.emoji} {p.name}</div>
+            <div className="title-line">{labels[i] || '✨ Игрок'}</div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  // Найдём носителей титулов
+  const byTime = [...withMs].sort((a, b) => b.activeMs - a.activeMs)
+  const slowest = byTime[0]                   // дольше всего отвечал
+  const fastest = byTime[byTime.length - 1]   // самый быстрый
+  // Средний хранитель (медиана) — «надёжный игрок»
+  const median = byTime[Math.floor(byTime.length / 2)]
+
+  const fmt = (ms) => {
+    const s = Math.round(ms / 1000)
+    if (s < 60) return `${s}с`
+    const m = Math.floor(s / 60); const r = s % 60
+    return r ? `${m}м ${r}с` : `${m}м`
+  }
+  const titles = []
+  if (slowest && slowest.activeMs > 0) titles.push({
+    icon: '🧠', name: 'Думатель', who: slowest, sub: `Дольше всех у руля — ${fmt(slowest.activeMs)}`,
+  })
+  if (fastest && fastest.activeMs > 0 && fastest.id !== slowest.id) titles.push({
+    icon: '⚡', name: 'Молниеносный', who: fastest, sub: `Самые быстрые ходы — ${fmt(fastest.activeMs)}`,
+  })
+  if (median && median.id !== slowest.id && median.id !== fastest.id) titles.push({
+    icon: '🎯', name: 'Стабильный', who: median, sub: `Уверенный темп всю игру`,
+  })
+  // Если игроков 2 — дополним «Герой вечера» от типа игры
+  if (titles.length < 3 && withMs.length > 0) {
+    const heroEmoji = game.id === 'truth' ? '🔥' : game.id === 'never' ? '🙅' : '🎉'
+    titles.push({
+      icon: heroEmoji, name: 'Герой вечера', who: byTime[0], sub: 'Душа компании',
+    })
+  }
+  return (
+    <div className="titles-grid">
+      {titles.slice(0, 3).map((t, i) => (
+        <div key={`${t.name}-${t.who.id}-${i}`} className="title-card">
+          <div className="title-icon">{t.icon}</div>
+          <div className="title-body">
+            <div className="title-name">{t.name}</div>
+            <div className="title-who">{t.who.emoji} {t.who.name}</div>
+            <div className="title-sub">{t.sub}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ResultsScreen({ game, players, scores, onAgain, onHome }) {
+  const [shared, setShared] = useState(false)
+  const hasScores = players.some(p => (scores[p.id] || 0) > 0)
+
+  const ranked = useMemo(() =>
+    [...players].sort((a, b) => (scores[b.id] || 0) - (scores[a.id] || 0)),
+    [players, scores]
+  )
+
+  const shareResultsToTelegram = useCallback(async () => {
+    const lines = [`🎉 Итоги — ${game.title}`, '']
+    const medals = ['🏆','🥈','🥉']
+    ranked.forEach((p, i) => {
+      const m = medals[i] || `${i+1}.`
+      lines.push(`${m} ${p.name}${hasScores ? ` — ${scores[p.id]||0} оч.` : ''}`)
+    })
+    const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, `g_${game.id}`) || 'https://partyup-game.ru'
+    lines.push('', `🎮 Сыграйте вместе: ${deeplink}`)
+    const text = lines.join('\n')
+    await doInviteShare({ deeplink, text, gameId: game.id, kind: 'results', evName: 'results' })
+    setShared(true)
+  }, [game, ranked, scores, hasScores])
+
+const podiumMedals = ['🏆', '🥈', '🥉']
+  const podiumLabels = ['Победитель', 'Второе место', 'Третье место']
+  const top3 = ranked.slice(0, 3)
+
   return (
     <div>
       <div className="results-hero">
         <span className="results-trophy" role="img" aria-label="Победа">🎊</span>
-        <h2 className="gradient-text">Раунд завершён!</h2>
+        <h2 className="gradient-text">Игра завершена!</h2>
         <p className="lead">Отличная вечеринка — {game.title}</p>
       </div>
-      <div className="results-cards">
-        {results.map((r,i) => (
-          <div key={i} className="result-item">
-            <span className="result-medal">{r.medal}</span>
-            <div>
-              <div className="result-label">{r.label}</div>
-              <div className="result-value">{r.value}</div>
-            </div>
+
+      {hasScores ? (
+        <>
+          <div className="results-cards">
+            {ranked.slice(0, 3).map((p, i) => (
+              <div key={p.id} className={`result-item ${i === 0 ? 'result-winner' : ''}`}>
+                <span className="result-medal">{podiumMedals[i]}</span>
+                <div style={{flex:1}}>
+                  <div className="result-label">{podiumLabels[i]}</div>
+                  <div className="result-value">{p.emoji} {p.name}</div>
+                </div>
+                <div className="result-score-badge">{scores[p.id] || 0} <span style={{fontSize:11,opacity:0.7}}>оч.</span></div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      <div className="share-card" style={{marginBottom:20}}>
-        <p style={{fontWeight:750,marginBottom:6,fontSize:16}}>Поделись итогами 🎉</p>
-        <p style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>Отправь карточку в чат с друзьями</p>
-        <button className="btn-primary no-pulse" onClick={() => setShared(true)} style={{opacity:shared?0.65:1}}>
+          {ranked.length > 3 && (
+            <div className="results-full-table">
+              {ranked.slice(3).map((p, i) => (
+                <div key={p.id} className="results-row">
+                  <span className="results-row-rank">{i + 4}</span>
+                  <span className="results-row-emoji">{p.emoji}</span>
+                  <span className="results-row-name">{p.name}</span>
+                  <span className="results-row-score">{scores[p.id] || 0} оч.</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <TitlesBoard players={players} game={game}/>
+      )}
+
+      {/* Share block */}
+      <div className="share-card">
+        <p className="share-card-title">Поделись итогами 🎉</p>
+        <p className="share-card-sub">Отправь результаты в чат — пусть все завидуют</p>
+        <button className="btn-primary no-pulse" onClick={shareResultsToTelegram} style={{opacity: shared ? 0.7 : 1}}>
           {shared ? <><Check size={17}/> Отправлено!</> : <><Send size={17}/> Поделиться в Telegram</>}
         </button>
       </div>
-      <button className="btn-primary mt-8 no-pulse" onClick={onAgain}><RotateCcw size={16}/> Ещё раунд</button>
-      <button className="btn-secondary mt-10" onClick={onHome}><Home size={16}/> На главную</button>
+
+      {/* Action buttons */}
+      <div className="results-actions">
+        <button className="btn-primary no-pulse" onClick={onAgain}>
+          <RotateCcw size={16}/> Новая игра
+        </button>
+        <button className="btn-secondary" onClick={onHome}>
+          <Dices size={16}/> Выбрать другую игру
+        </button>
+      </div>
     </div>
   )
 }
 
 /* ─── SettingsScreen ─────────────────────────────────────────────────────── */
-function SettingsScreen({ settings, setSettings, onBack }) {
-  const rows = [
-    { key:'mode', label:'Режим игры', sub:'Один или несколько устройств', icon:<Play size={16}/>, options:['Один телефон','Свои устройства'] },
-    { key:'rounds', label:'Раундов', sub:'Количество вопросов за сессию', icon:<RotateCcw size={16}/>, options:[3,5,6,10] },
-    { key:'privacy', label:'Приватность', sub:'Кто может присоединиться', icon:<ShieldCheck size={16}/>, options:['По ссылке','Публичная'] },
-  ]
+// Расширенная статистика игрока — одинаково для гостя и TG.
+function ProfileStats({ stats, mode }) {
+  const total = Number(stats?.total_sessions || 0)
+  const finished = Number(stats?.finished_sessions || 0)
+  const minutes = Math.round(Number(stats?.total_seconds || 0) / 60)
+  const rounds = Number(stats?.total_rounds || 0)
+  const totalScore = Number(stats?.total_score || 0)
+  const rooms = Number(stats?.rooms || 0)
+  const friends = Number(stats?.friends || 0)
+  const gameMap = useMemo(() => Object.fromEntries(GAMES.map(g => [g.id, g])), [])
+  const byGame = stats?.byGame || []
+  const byVibe = stats?.byVibe || []
+  const vibeMap = useMemo(() => Object.fromEntries(VIBES.map(v => [v.id, v])), [])
+  const firstPlay = stats?.first_play
+  const lastPlay = stats?.last_play
+  const fmtRel = (ts) => {
+    if (!ts) return '—'
+    const diff = Date.now() - Number(ts)
+    const d = Math.floor(diff / 86400000)
+    if (d < 1) return 'сегодня'
+    if (d < 2) return 'вчера'
+    if (d < 7) return `${d} дн. назад`
+    if (d < 60) return `${Math.floor(d/7)} нед. назад`
+    return `${Math.floor(d/30)} мес. назад`
+  }
+
+  if (total === 0) {
+    return (
+      <div className="profile-empty">
+        Пока нет сыгранных партий. Открой игру и сыграй первый раунд — статистика появится здесь.
+      </div>
+    )
+  }
+
   return (
-    <div>
-      <p className="eyebrow"><Settings size={13}/> Настройки</p>
-      <h2 style={{marginBottom:20}}>Параметры игры</h2>
-      <div className="card">
-        <div className="settings-list">
-          {rows.map(r => (
-            <div key={r.key} className="settings-row">
-              <div>
-                <div className="settings-label">{r.icon} {r.label}</div>
-                <div className="settings-label-sub">{r.sub}</div>
-              </div>
-              <div style={{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
-                {r.options.map(o => (
-                  <button key={o}
-                    className={`tag ${settings[r.key]===o?'tag-accent':''}`}
-                    onClick={() => setSettings(s=>({...s,[r.key]:o}))}
-                    aria-pressed={settings[r.key]===o}>
-                    {o}
-                  </button>
-                ))}
-              </div>
+    <div className="profile-stats-wrap">
+      <div className="profile-stats">
+        <div className="profile-stat"><b>{total}</b><span>сессий</span></div>
+        <div className="profile-stat"><b>{finished}</b><span>завершено</span></div>
+        <div className="profile-stat"><b>{minutes}</b><span>минут</span></div>
+      </div>
+      <div className="profile-stats">
+        <div className="profile-stat"><b>{rounds}</b><span>раундов</span></div>
+        <div className="profile-stat"><b>{totalScore}</b><span>очков</span></div>
+        <div className="profile-stat"><b>{mode === 'telegram' ? friends : '—'}</b><span>{mode === 'telegram' ? 'друзей' : 'гость'}</span></div>
+      </div>
+
+      {byGame.length > 0 && (
+        <div className="profile-rank">
+          <div className="profile-rank-label">Любимые игры</div>
+          {byGame.slice(0, 5).map(r => (
+            <div key={r.game_id} className="profile-rank-row">
+              <span className="profile-rank-name">
+                {gameMap[r.game_id]?.emoji || '🎮'} {gameMap[r.game_id]?.title || r.game_id}
+              </span>
+              <span className="profile-rank-val">{r.plays}×</span>
             </div>
           ))}
         </div>
+      )}
+
+      {byVibe.length > 0 && (
+        <div className="profile-rank">
+          <div className="profile-rank-label">Любимые вайбы</div>
+          {byVibe.map(r => (
+            <div key={r.vibe} className="profile-rank-row">
+              <span className="profile-rank-name">
+                {vibeMap[r.vibe]?.icon || '✨'} {vibeMap[r.vibe]?.label || r.vibe}
+              </span>
+              <span className="profile-rank-val">{r.plays}×</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="profile-meta">
+        <span>Первая партия: {fmtRel(firstPlay)}</span>
+        <span>Последняя: {fmtRel(lastPlay)}</span>
+        {mode === 'telegram' && rooms > 0 && <span>Онлайн-комнат: {rooms}</span>}
       </div>
-      <button className="btn-secondary mt-20" onClick={onBack}><ArrowLeft size={16}/> Назад</button>
+    </div>
+  )
+}
+
+function ProfileCard({ auth }) {
+  const name = displayName(auth)
+  const avatar = avatarUrl(auth)
+  const isTg = auth.mode === 'telegram'
+  const stats = auth.stats || {}
+  const total = Number(stats.total_sessions || 0)
+  const finished = Number(stats.finished_sessions || 0)
+  const minutes = Math.round(Number(stats.total_seconds || 0) / 60)
+
+  const isInTelegram = !!window.Telegram?.WebApp?.initData
+  // Состояния bot-flow: 'idle' | 'waiting' (ждём подтверждения в боте) | 'error'
+  const [loginState, setLoginState] = useState('idle')
+  const pollRef = useRef(null)
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+
+  // Bot-driven login: сайт создаёт токен → открываем нативный TG
+  // (https://t.me/<bot>?start=auth_<token>) → юзер жмёт «Старт» → бот линкует
+  // токен с tg_id → сайт через polling /api/auth/poll получает cookie.
+  const loginViaBot = async () => {
+    setLoginState('waiting')
+    try {
+      const r = await api.authStart()
+      if (!r?.ok || !r.token) throw new Error('start_failed')
+
+      // Открываем нативный TG (на мобиле сразу приложение, на десктопе — TG Desktop
+      // или предложение установить). Используем https-ссылку — она универсальна.
+      const link = r.deeplink_https
+      const tg = window.Telegram?.WebApp
+      if (tg?.openTelegramLink) tg.openTelegramLink(link)
+      else window.open(link, '_blank', 'noopener')
+
+      // Поллим каждые 1.5 сек до 5 минут.
+      const startedAt = Date.now()
+      const poll = async () => {
+        try {
+          const res = await fetch(`/api/auth/poll?token=${encodeURIComponent(r.token)}`, { credentials: 'include' })
+          const data = await res.json().catch(() => ({}))
+          if (data?.status === 'ok') {
+            clearInterval(pollRef.current); pollRef.current = null
+            window.location.reload()
+            return
+          }
+          if (data?.status === 'expired' || data?.status === 'consumed' ||
+              Date.now() - startedAt > 5 * 60 * 1000) {
+            clearInterval(pollRef.current); pollRef.current = null
+            setLoginState('error')
+          }
+        } catch {}
+      }
+      pollRef.current = setInterval(poll, 1500)
+      poll() // first call сразу
+    } catch {
+      setLoginState('error')
+    }
+  }
+
+  const cancelLogin = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    setLoginState('idle')
+  }
+
+  return (
+    <div className="card profile-card" style={{marginBottom:12}}>
+      <div className="profile-row">
+        <div className="profile-avatar">
+          {avatar
+            ? <img src={avatar} alt="" referrerPolicy="no-referrer"/>
+            : <span className="profile-avatar-initials">{name.slice(0, 1).toUpperCase()}</span>}
+        </div>
+        <div className="profile-info">
+          <div className="profile-name">{name}</div>
+          <div className="profile-status">
+            {isTg && <><CircleCheck size={12} color="#30d158"/> Авторизован через Telegram</>}
+            {auth.mode === 'anon' && <><Info size={12} color="var(--muted)"/> Гость (без Telegram)</>}
+            {auth.mode === 'guest' && <><Info size={12} color="var(--muted)"/> Не авторизован</>}
+          </div>
+          {isTg && auth.tgUser?.is_premium ? (
+            <div className="profile-badge">⭐ Telegram Premium</div>
+          ) : null}
+        </div>
+      </div>
+      {/* Статистика — для обоих режимов (TG и гостя) */}
+      {auth.mode !== 'guest' && (
+        <ProfileStats stats={stats} mode={auth.mode}/>
+      )}
+      {!isTg && (
+        <div className="login-block">
+          {loginState !== 'waiting' && (
+            <button className="btn-tg-login mt-12" onClick={loginViaBot}>
+              <Send size={16}/> Войти через Telegram
+            </button>
+          )}
+          {loginState === 'waiting' && (
+            <div className="login-waiting">
+              <div className="login-waiting-spinner" aria-hidden="true"/>
+              <div className="login-waiting-text">
+                <strong>Открой Telegram и нажми «Старт»</strong>
+                <span>Бот подтвердит вход — сессия откроется автоматически.</span>
+              </div>
+              <button className="btn-ghost" style={{width:'100%', justifyContent:'center', marginTop: 12}}
+                onClick={cancelLogin}>
+                Отменить
+              </button>
+            </div>
+          )}
+          {loginState === 'error' && (
+            <div className="mp-error-hint" style={{marginTop: 10}}>
+              <X size={14}/> Ссылка устарела или вход не подтверждён. Попробуй ещё раз.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// tg_id админа — единственная авторитарная проверка для рендера UI-кнопки
+// «Админка». Это только защита от показа; реальный доступ режется на сервере
+// (см. requireAdmin в worker.js). Если кто-то и подделает id в DevTools — он
+// получит максимум пустую страницу, потому что /api/admin/* вернёт 403.
+const ADMIN_TG_ID = 265489213
+function isAdminAuth(auth) {
+  const id = auth?.tgUser?.id ?? auth?.user?.tg_id
+  return Number(id) === ADMIN_TG_ID
+}
+
+function ProfileScreen({ auth, onReturnToGame }) {
+  const showAdmin = isAdminAuth(auth)
+  return (
+    <div>
+      <p className="eyebrow"><Users size={13}/> Профиль</p>
+      <div className="profile-screen-head">
+        <h2 className="profile-screen-name">{displayName(auth)}</h2>
+        {onReturnToGame && (
+          <button className="profile-return-btn" onClick={onReturnToGame}>
+            <Play size={14}/> Вернуться в игру
+          </button>
+        )}
+      </div>
+      <ProfileCard auth={auth} />
+      {showAdmin && (
+        <button
+          className="btn-secondary"
+          style={{marginTop: 16, width: '100%'}}
+          onClick={() => {
+            // Открываем админку. Без токена — на стороне сервера проверится
+            // initData/cookie, для админа всё откроется.
+            const url = '/api/admin/vault'
+            const tg = window.Telegram?.WebApp
+            if (tg?.openLink) tg.openLink(window.location.origin + url, { try_instant_view: false })
+            else window.open(url, '_blank', 'noopener')
+          }}
+        >
+          <ShieldCheck size={16}/> Открыть админку
+        </button>
+      )}
+    </div>
+  )
+}
+
+function SettingsScreen({ settings, setSettings, onBack }) {
+  const [hapticsOn, setHapticsOn] = useState(() => localStorage.getItem('pu_haptics') !== 'off')
+  const [theme, setTheme] = useState(() => localStorage.getItem('pu_theme') || 'dark')
+
+  const toggleHaptics = () => {
+    const next = !hapticsOn
+    setHapticsOn(next)
+    localStorage.setItem('pu_haptics', next ? 'on' : 'off')
+  }
+
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'vibrant' : 'dark'
+    setTheme(next)
+    localStorage.setItem('pu_theme', next)
+    document.documentElement.className = next === 'vibrant' ? 'theme-vibrant' : ''
+  }
+
+  const openSupport = () => {
+    // Команда /support боту откроет диалог сразу с подсказкой описать вопрос
+    // одним сообщением — webhook handle перешлёт админу.
+    const link = `https://t.me/${BOT_USERNAME}?start=support`
+    const tg = window.Telegram?.WebApp
+    if (tg?.openTelegramLink) tg.openTelegramLink(link)
+    else window.open(link, '_blank', 'noopener')
+  }
+
+  const rows = [] // настройки игры теперь живут в CreateLobby (под каждую игру свои)
+
+  return (
+    <div>
+      <p className="eyebrow"><Settings size={13}/> Настройки</p>
+      <h2 style={{marginBottom:20}}>Параметры приложения</h2>
+
+      {/* App preferences */}
+      <div className="card" style={{marginBottom:12}}>
+        <div className="settings-list">
+          <div className="settings-row">
+            <div>
+              <div className="settings-label"><Sparkles size={16}/> Тема</div>
+              <div className="settings-label-sub">Цветовое оформление</div>
+            </div>
+            <button
+              className={`settings-toggle-btn ${theme === 'vibrant' ? 'is-on' : ''}`}
+              onClick={toggleTheme}
+              aria-pressed={theme === 'vibrant'}>
+              {theme === 'vibrant' ? '🌈 Яркая' : '🌙 Тёмная'}
+            </button>
+          </div>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label"><Rocket size={16}/> Вибрация</div>
+              <div className="settings-label-sub">Haptic feedback при действиях</div>
+            </div>
+            <button
+              className={`settings-toggle-btn ${hapticsOn ? 'is-on' : ''}`}
+              onClick={toggleHaptics}
+              aria-pressed={hapticsOn}>
+              {hapticsOn ? 'Вкл' : 'Выкл'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Support */}
+      <div className="card" style={{marginBottom:20}}>
+        <div className="settings-list">
+          <button className="settings-row settings-row-btn" onClick={openSupport}>
+            <div>
+              <div className="settings-label"><Send size={16}/> Поддержка</div>
+              <div className="settings-label-sub">Написать в Telegram</div>
+            </div>
+            <ChevronRight size={16} color="var(--muted)"/>
+          </button>
+          <div className="settings-row">
+            <div>
+              <div className="settings-label" style={{color:'var(--muted)',fontSize:13}}>Язык</div>
+              <div className="settings-label-sub">Меняется в настройках Telegram</div>
+            </div>
+            <span className="tag">🇷🇺 Русский</span>
+          </div>
+        </div>
+      </div>
+
+      <button className="btn-secondary" onClick={onBack}><ArrowLeft size={16}/> Назад</button>
     </div>
   )
 }

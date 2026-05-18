@@ -21,9 +21,10 @@
   --s3: #241f35;
   --s4: #2e2847;
 
-  /* ── Text ────────────────────────────────────── */
-  --text:   var(--tg-text);
-  --muted:  var(--tg-hint);
+  /* ── Text (hard-coded — don't use TG theme vars,
+       they break in light-mode Telegram clients) ── */
+  --text:   #f0eeff;
+  --muted:  rgba(240,238,255,0.42);
   --muted2: rgba(240,238,255,0.22);
 
   /* ── Borders ─────────────────────────────────── */
@@ -67,7 +68,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  background: var(--s0);
+  background: var(--s0) !important;
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
   font-size: 16px;

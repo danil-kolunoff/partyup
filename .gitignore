@@ -15,6 +15,9 @@ dist-ssr
 .dev.vars
 .env
 
+# Claude Code workspace (агент Claude хранит сюда worktrees / launch.json)
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
