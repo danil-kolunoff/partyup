@@ -1349,6 +1349,16 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .chart-bar-label { position: absolute; bottom: -22px; font-size: 9px; color: var(--m); transform: rotate(-30deg); transform-origin: top left; white-space: nowrap; }
 .chart-bar-val { position: absolute; top: -16px; font-size: 9px; color: var(--a2); opacity: 0; transition: opacity .15s; }
 .chart-bar:hover .chart-bar-val { opacity: 1; }
+.cov-table th, .cov-table td { padding: 6px 10px; text-align: center; }
+.cov-table th { font-size: 10px; color: var(--m); white-space: nowrap; }
+.cov-table th:first-child, .cov-table td:first-child { text-align: left; }
+.cov-table th.cov-adult { color: #f472b6; }
+.cov-cell { font-variant-numeric: tabular-nums; font-size: 12px; }
+.cov-zero { color: var(--m); opacity: .5; }
+.cov-low  { color: #fbbf24; }
+.cov-mid  { color: var(--a2); }
+.cov-high { color: var(--ok); font-weight: 600; }
+.cov-sum  { color: var(--t); font-weight: 700; border-left: 1px solid var(--s3); }
 .filters { background: var(--s2); padding: 12px; border-radius: 12px; margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .filters input, .filters select { min-width: 0; }
 table { width: 100%; border-collapse: collapse; background: var(--s1); border-radius: 10px; overflow: hidden; }
@@ -1391,7 +1401,6 @@ td.acts button { padding: 4px 8px; font-size: 12px; }
 <div class="app">
   <div class="row" style="margin-bottom: 14px;">
     <h1>🎛 PartyUp Admin</h1>
-    <span class="muted">D1-only · DO не дёргается без явной нужды</span>
     <span class="spacer"></span>
     <span class="muted" id="conn"></span>
   </div>
@@ -1536,10 +1545,10 @@ async function viewDashboard(root) {
     root.innerHTML = '';
     const c = s.counters;
     const kpis = [
-      ['Юзеры', c.users], ['Premium', c.premium],
+      ['Юзеры', c.users],
       ['Сессии · сегодня', c.sessionsDay], ['Сессии · неделя', c.sessionsWeek],
       ['Сессии · всего', c.sessionsTotal], ['Активные комнаты', c.activeRooms],
-      ['Карточки', c.cardsTotal + ' / ✓' + c.cardsApproved], ['Событий', c.eventsTotal],
+      ['Событий', c.eventsTotal],
     ];
     root.appendChild(h('div', { class: 'kpis' }, kpis.map(([l,v]) =>
       h('div', { class: 'kpi' }, h('div', { class: 'v' }, String(v)), h('div', { class: 'l' }, l))
@@ -1577,19 +1586,6 @@ async function viewDashboard(root) {
       (s.sessTimeByDay || []).length
         ? drawDayChart(s.sessTimeByDay, 'sessions')
         : h('div', { class: 'muted' }, 'Нет данных'),
-    ));
-    // Cloudflare quotas — статично, чисто как подсказка.
-    charts.appendChild(h('div', { class: 'card' },
-      h('div', { class: 'row', style: 'margin-bottom:8px' },
-        h('b', {}, 'Cloudflare Free Tier · лимиты'),
-      ),
-      h('div', { class: 'muted', style: 'font-size:12px; line-height:1.6' },
-        h('div', {}, 'DO requests: 100 000 /day (общий пул)'),
-        h('div', {}, 'DO storage: 1 GB; DO duration: 13 000 ГБ·с/мес'),
-        h('div', {}, 'Workers requests: 100 000 /day'),
-        h('div', {}, 'D1: 5 млн read rows/day, 100 K write rows/day, 5 GB storage'),
-        h('div', { style: 'margin-top:8px; color: var(--m)' }, 'Точный расход CF не отдаёт без Analytics-API; считай по эмпирике polling-интервалов.'),
-      ),
     ));
     root.appendChild(charts);
     const maxG = Math.max(1, ...(s.topGames || []).map(r => r.n));
@@ -1694,20 +1690,43 @@ async function viewDashboard(root) {
       ));
     });
     root.appendChild(evWrap);
-    root.appendChild(h('h2', {}, 'Покрытие контента: игра × вайб'));
+    // Покрытие контента: матрица «игра × вайб». Карточки могут иметь несколько
+    // тегов сразу — суммируем по каждому, чтобы видеть реальный пул на вайб.
+    root.appendChild(h('h2', {}, 'Покрытие контента'));
     const byGV = s.byGameVibe || [];
-    const tableC = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
-    const tbl = h('table', {},
+    const games = [...new Set(byGV.map(r => r.game_id))].sort();
+    const pivot = {}; // pivot[game][vibe] = n
+    const noTag = {}; // карточки без вайба
+    games.forEach(g => { pivot[g] = {}; noTag[g] = 0; });
+    byGV.forEach(r => {
+      const vibes = (r.vibes || '').split(',').filter(Boolean);
+      if (!vibes.length) noTag[r.game_id] = (noTag[r.game_id] || 0) + r.n;
+      else vibes.forEach(v => { pivot[r.game_id][v] = (pivot[r.game_id][v] || 0) + r.n; });
+    });
+    // Колонки = ВСЕ известные вайбы + «без тега». Гарантируем стабильный порядок.
+    const cov = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
+    const cellClass = (n) => n === 0 ? 'cov-zero' : n < 20 ? 'cov-low' : n < 60 ? 'cov-mid' : 'cov-high';
+    cov.appendChild(h('table', { class: 'cov-table' },
       h('thead', {}, h('tr', {},
-        h('th', {}, 'Игра'), h('th', {}, 'Вайбы (csv)'), h('th', {}, 'Карточек'),
+        h('th', {}, 'Игра'),
+        ...VIBES.map(v => h('th', { class: v==='adult'||v==='ultra_adult' ? 'cov-adult' : null }, v)),
+        h('th', {}, '∅'),
+        h('th', {}, 'Σ'),
       )),
-      h('tbody', {}, byGV.map(r => h('tr', {},
-        h('td', { class: 'type' }, r.game_id),
-        h('td', {}, r.vibes ? (r.vibes.split(',').filter(Boolean).map(v => h('span', { class: 'chip' + (v==='adult'||v==='ultra_adult' ? ' adult' : '') }, v))) : h('span', { class: 'muted' }, 'без тегов')),
-        h('td', { class: 'intensity intensity-2' }, String(r.n)),
-      ))),
-    );
-    tableC.appendChild(tbl); root.appendChild(tableC);
+      h('tbody', {}, games.map(g => {
+        const total = VIBES.reduce((s, v) => s + (pivot[g][v] || 0), 0) + (noTag[g] || 0);
+        return h('tr', {},
+          h('td', { class: 'type' }, g),
+          ...VIBES.map(v => {
+            const n = pivot[g][v] || 0;
+            return h('td', { class: 'cov-cell ' + cellClass(n) }, n ? String(n) : '·');
+          }),
+          h('td', { class: 'cov-cell ' + cellClass(noTag[g] || 0) }, noTag[g] ? String(noTag[g]) : '·'),
+          h('td', { class: 'cov-cell cov-sum' }, String(total)),
+        );
+      })),
+    ));
+    root.appendChild(cov);
     root.appendChild(h('h2', {}, 'Последние сессии'));
     const rs = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
     rs.appendChild(h('table', {},
