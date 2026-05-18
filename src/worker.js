@@ -1279,6 +1279,18 @@ async function requireAdmin(request, env) {
   return { ok: false, response: corsJson({ error: 'forbidden' }, 403) };
 }
 
+// Mini App открывает админку через внешний браузер (tg.openLink), а тот
+// не несёт ни X-Init-Data, ни cookie. Поэтому admin сначала фетчит этот
+// эндпоинт ИЗ Mini App (с initData → server подтверждает что это он),
+// получает токен, и потом открывает /api/admin/vault?token=... в браузере.
+async function handleAdminIssueToken(request, env) {
+  const { userId } = await resolveCaller(request, env);
+  if (userId !== ADMIN_USER_ID) return corsJson({ error: 'forbidden' }, 403);
+  const t = vaultToken(env);
+  if (!t) return corsJson({ error: 'token_not_configured' }, 500);
+  return adminJson({ ok: true, token: t });
+}
+
 function adminJson(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -1601,6 +1613,74 @@ async function viewDashboard(root) {
       )),
       (s.topVibes||[]).length ? null : h('div', { class: 'muted' }, 'Пусто'),
     ));
+    // Retention + avg-session + funnel — три карточки в ряд
+    root.appendChild(h('h2', {}, 'Поведение пользователей'));
+    const beh = h('div', { class: 'grid2' });
+    // Retention
+    const ret = s.retention || {};
+    const retPct = (r, c) => c > 0 ? Math.round((r/c) * 100) + '%' : '—';
+    beh.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'row', style: 'margin-bottom:10px' },
+        h('b', {}, 'Retention'),
+        h('span', { class: 'spacer', style: 'flex:1' }),
+        h('span', { class: 'muted' }, 'когорта = closed window'),
+      ),
+      h('div', { class: 'kpis' },
+        h('div', { class: 'kpi' },
+          h('div', { class: 'v' }, retPct(ret.ret_d1, ret.cohort_d1)),
+          h('div', { class: 'l' }, 'D1 · ' + (ret.ret_d1 || 0) + '/' + (ret.cohort_d1 || 0))),
+        h('div', { class: 'kpi' },
+          h('div', { class: 'v' }, retPct(ret.ret_d7, ret.cohort_d7)),
+          h('div', { class: 'l' }, 'D7 · ' + (ret.ret_d7 || 0) + '/' + (ret.cohort_d7 || 0))),
+        h('div', { class: 'kpi' },
+          h('div', { class: 'v' }, retPct(ret.ret_d30, ret.cohort_d30)),
+          h('div', { class: 'l' }, 'D30 · ' + (ret.ret_d30 || 0) + '/' + (ret.cohort_d30 || 0))),
+      ),
+      h('div', { class: 'muted', style: 'margin-top:8px; font-size:11px' },
+        'Когорта = юзеры, чей first-day прошёл ≥N дней назад. Returned = была сессия точно на first+N день.'),
+    ));
+    // Avg session
+    const avg = s.avgSession || {};
+    beh.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'row', style: 'margin-bottom:10px' },
+        h('b', {}, 'Средняя длина сессии'),
+      ),
+      h('div', { class: 'kpis' },
+        h('div', { class: 'kpi' },
+          h('div', { class: 'v' }, fmtDuration(Math.round(avg.all?.avg || 0))),
+          h('div', { class: 'l' }, 'всё время · n=' + (avg.all?.n || 0))),
+        h('div', { class: 'kpi' },
+          h('div', { class: 'v' }, fmtDuration(Math.round(avg.week?.avg || 0))),
+          h('div', { class: 'l' }, '7 дней · n=' + (avg.week?.n || 0))),
+      ),
+      h('div', { class: 'muted', style: 'margin-top:8px; font-size:11px' },
+        'AVG(duration_sec) только по finished-сессиям. Сессии без finish дольше часа auto-закрываются sweep-job.'),
+    ));
+    // Funnel
+    const funnelOrder = ['open', 'game_select', 'game_start', 'game_finish'];
+    const funnelMap = new Map((s.funnel || []).map(r => [r.type, r.users]));
+    const funnelTop = funnelMap.get('open') || 0;
+    beh.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'row', style: 'margin-bottom:10px' },
+        h('b', {}, 'Воронка (7 дней, уникальные)'),
+      ),
+      ...funnelOrder.map((step, i) => {
+        const n = funnelMap.get(step) || 0;
+        const pct = funnelTop > 0 ? Math.round(n/funnelTop*100) : 0;
+        const conv = i > 0 && funnelMap.get(funnelOrder[i-1])
+          ? Math.round(n/funnelMap.get(funnelOrder[i-1])*100) : null;
+        return h('div', { class: 'bar' },
+          h('div', { class: 'label', style: 'width:130px' }, step),
+          h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + pct + '%' })),
+          h('div', { class: 'n', style: 'width: 80px' },
+            String(n) + ' · ' + pct + '%' + (conv != null ? ' (→' + conv + '%)' : '')),
+        );
+      }),
+      h('div', { class: 'muted', style: 'margin-top:8px; font-size:11px' },
+        'COUNT(DISTINCT user|anon) по событиям. Если каких-то шагов нет — клиент их пока не шлёт.'),
+    ));
+    root.appendChild(beh);
+
     // Event types — общая аналитика
     root.appendChild(h('h2', {}, 'События по типам (всё время)'));
     const evWrap = h('div', { class: 'card', style: 'padding: 12px;' });
@@ -2007,13 +2087,21 @@ function openPackModal(p, refresh) {
 }
 
 /* ─── Users ────────────────────────────────────────────────────────────── */
-const usersState = { q: '', limit: 50, offset: 0 };
+const usersState = { q: '', sort: 'playtime', limit: 50, offset: 0 };
 async function viewUsers(root) {
   const f = h('div', { class: 'filters' });
   const q = h('input', { placeholder: 'Поиск по нику / имени / tg_id…', value: usersState.q, style: 'flex:1; min-width:200px' });
   q.oninput = (e) => usersState.q = e.target.value;
   q.onkeydown = (e) => { if (e.key === 'Enter') { usersState.offset = 0; refresh(); } };
   f.appendChild(q);
+  const sortSel = h('select', { onchange: (e) => { usersState.sort = e.target.value; usersState.offset = 0; refresh(); } });
+  [
+    ['playtime', '⏱ по игровому времени'],
+    ['games', '🎮 по числу игр'],
+    ['recent', '👁 по last_seen'],
+    ['created', '✨ по дате регистрации'],
+  ].forEach(([v, l]) => sortSel.appendChild(h('option', { value: v, selected: v === usersState.sort ? 'selected' : null }, l)));
+  f.appendChild(sortSel);
   f.appendChild(h('button', { onclick: () => { usersState.offset = 0; refresh(); } }, 'Найти'));
   root.appendChild(f);
   const wrap = h('div'); root.appendChild(wrap);
@@ -2023,6 +2111,7 @@ async function viewUsers(root) {
     try {
       const qs = new URLSearchParams();
       if (usersState.q) qs.set('q', usersState.q);
+      qs.set('sort', usersState.sort);
       qs.set('limit', usersState.limit); qs.set('offset', usersState.offset);
       const d = await api('/api/admin/users?' + qs.toString());
       wrap.innerHTML = '';
@@ -2030,14 +2119,21 @@ async function viewUsers(root) {
       wrap.appendChild(h('table', {},
         h('thead', {}, h('tr', {},
           h('th', {}, 'tg_id'), h('th', {}, ''), h('th', {}, 'имя'), h('th', {}, 'username'),
-          h('th', {}, 'игр'), h('th', {}, 'premium'), h('th', {}, 'seen'), h('th', {}, ''),
+          h('th', {}, 'игр'), h('th', {}, '⏱ время'),
+          h('th', {}, '★ вайб'), h('th', {}, '★ игра'),
+          h('th', {}, 'premium'), h('th', {}, 'seen'), h('th', {}, ''),
         )),
         h('tbody', {}, d.rows.map(u => h('tr', {},
           h('td', { class: 'id' }, String(u.tg_id)),
           h('td', {}, u.photo_url ? h('img', { src: u.photo_url, style: 'width:28px;height:28px;border-radius:50%;', referrerpolicy: 'no-referrer' }) : (u.emoji || '·')),
           h('td', {}, u.display_name || ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || h('span', { class: 'muted' }, '—')),
           h('td', {}, u.username ? '@' + u.username : h('span', { class: 'muted' }, '—')),
-          h('td', { class: 'intensity intensity-2' }, String(u.total_games || 0)),
+          h('td', { class: 'intensity intensity-2' }, String(u.session_count || u.total_games || 0)),
+          h('td', { class: 'intensity intensity-3' }, u.total_active_ms ? fmtDuration(Math.round(u.total_active_ms/1000)) : h('span', { class: 'muted' }, '—')),
+          h('td', {}, u.favorite_vibe
+            ? h('span', { class: 'chip' + (u.favorite_vibe==='adult'||u.favorite_vibe==='ultra_adult' ? ' adult' : '') }, u.favorite_vibe)
+            : h('span', { class: 'muted' }, '—')),
+          h('td', { class: 'type' }, u.favorite_game || h('span', { class: 'muted' }, '—')),
           h('td', {}, u.premium_until && u.premium_until > Date.now() ? h('span', { class: 'chip ok' }, 'до ' + fmtTs(u.premium_until)) : h('span', { class: 'muted' }, '—')),
           h('td', { class: 'id' }, fmtTs(u.last_seen_at)),
           h('td', { class: 'acts' }, h('button', { onclick: () => openUserModal(u, refresh) }, '✎')),
@@ -2311,17 +2407,27 @@ async function handleAdminStats(request, env) {
        WHERE state <> 'ended' AND updated_at < ?`
     ).bind(ts, ts, ts - staleMs).run();
     // Сессии без finished_at и старше часа — закрываем как abandoned.
+    // duration_sec ограничиваем 1 часом для abandoned (реалистичный максимум
+    // партии — никто не сидит 8 часов; иначе среднее время улетает в космос).
     await env.DB.prepare(
       `UPDATE sessions SET finished = 1, finished_at = ?,
-         duration_sec = COALESCE(duration_sec, (? - started_at) / 1000)
+         duration_sec = MIN(3600, COALESCE(duration_sec, (? - started_at) / 1000))
        WHERE finished = 0 AND started_at < ?`
     ).bind(ts, ts, ts - 3600 * 1000).run();
+    // Одноразовая нормализация уже существующих «раздутых» finished-сессий:
+    // если duration > 4 часов — почти наверняка abandoned, который sweep
+    // пометил полной разницей. Ограничиваем 1 часом, чтобы avg был адекватный.
+    await env.DB.prepare(
+      `UPDATE sessions SET duration_sec = 3600
+       WHERE duration_sec > 14400 AND finished = 1`
+    ).run();
   } catch {}
 
   const [
     users, premium, sessTotal, sessDay, sessWeek, cardsTotal, cardsApproved, rooms, eventsTotal,
     topGames, topVibes, byGameVibe, daily, recentSessions,
     dauByDay, sessTimeByDay, eventTypes, cardTypes,
+    avgSessionAll, avgSessionWeek, retention, funnel,
   ] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS n FROM users`).first(),
     env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE premium_until > ?`).bind(ts).first(),
@@ -2378,6 +2484,51 @@ async function handleAdminStats(request, env) {
       `SELECT game_id, type, COUNT(*) AS n FROM cards WHERE type IS NOT NULL AND type <> ''
        GROUP BY game_id, type ORDER BY game_id, n DESC`
     ).all(),
+    // Средняя длина finished-сессий (сек) — всё время и за неделю.
+    env.DB.prepare(
+      `SELECT AVG(duration_sec) AS avg, COUNT(*) AS n
+       FROM sessions WHERE finished = 1 AND duration_sec > 0`
+    ).first(),
+    env.DB.prepare(
+      `SELECT AVG(duration_sec) AS avg, COUNT(*) AS n
+       FROM sessions WHERE finished = 1 AND duration_sec > 0 AND started_at >= ?`
+    ).bind(weekAgo).first(),
+    // Retention D1/D7/D30. Когорта — все юзеры (user_id или anon_id), у которых
+    // первый день активности >= N+1 дней назад (иначе window ещё не закрыто).
+    // Возвращаемся = есть сессия в день first+N.
+    env.DB.prepare(
+      `WITH first_day AS (
+         SELECT COALESCE(CAST(user_id AS TEXT), anon_id) AS uid,
+                date(MIN(started_at)/1000, 'unixepoch') AS d0
+         FROM sessions
+         WHERE user_id IS NOT NULL OR anon_id IS NOT NULL
+         GROUP BY uid
+       )
+       SELECT
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 1 THEN 1 ELSE 0 END) AS cohort_d1,
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 7 THEN 1 ELSE 0 END) AS cohort_d7,
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 30 THEN 1 ELSE 0 END) AS cohort_d30,
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 1 AND EXISTS (
+           SELECT 1 FROM sessions s WHERE COALESCE(CAST(s.user_id AS TEXT), s.anon_id) = fd.uid
+             AND date(s.started_at/1000,'unixepoch') = date(fd.d0, '+1 day')
+         ) THEN 1 ELSE 0 END) AS ret_d1,
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 7 AND EXISTS (
+           SELECT 1 FROM sessions s WHERE COALESCE(CAST(s.user_id AS TEXT), s.anon_id) = fd.uid
+             AND date(s.started_at/1000,'unixepoch') = date(fd.d0, '+7 day')
+         ) THEN 1 ELSE 0 END) AS ret_d7,
+         SUM(CASE WHEN julianday('now','utc') - julianday(d0) >= 30 AND EXISTS (
+           SELECT 1 FROM sessions s WHERE COALESCE(CAST(s.user_id AS TEXT), s.anon_id) = fd.uid
+             AND date(s.started_at/1000,'unixepoch') = date(fd.d0, '+30 day')
+         ) THEN 1 ELSE 0 END) AS ret_d30
+       FROM first_day fd`
+    ).first(),
+    // Воронка: уникальные участники события за 7 дней по каждому шагу.
+    env.DB.prepare(
+      `SELECT type, COUNT(DISTINCT COALESCE(CAST(user_id AS TEXT), anon_id)) AS users
+       FROM events
+       WHERE ts >= ? AND type IN ('open','game_select','game_start','game_finish')
+       GROUP BY type`
+    ).bind(weekAgo).all(),
   ]);
   return adminJson({
     ok: true,
@@ -2401,6 +2552,12 @@ async function handleAdminStats(request, env) {
     sessTimeByDay: sessTimeByDay.results || [],
     eventTypes: eventTypes.results || [],
     cardTypes: cardTypes.results || [],
+    avgSession: {
+      all: { avg: avgSessionAll?.avg || 0, n: avgSessionAll?.n || 0 },
+      week: { avg: avgSessionWeek?.avg || 0, n: avgSessionWeek?.n || 0 },
+    },
+    retention: retention || { cohort_d1: 0, cohort_d7: 0, cohort_d30: 0, ret_d1: 0, ret_d7: 0, ret_d30: 0 },
+    funnel: funnel.results || [],
   });
 }
 
@@ -2639,6 +2796,7 @@ async function handleAdminUsers(request, env, method, idStr) {
 
   if (method === 'GET' && !idStr) {
     const q = url.searchParams.get('q');
+    const sort = url.searchParams.get('sort') || 'recent'; // recent | playtime | games | created
     const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 100)));
     const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
     const where = []; const args = [];
@@ -2648,16 +2806,35 @@ async function handleAdminUsers(request, env, method, idStr) {
       args.push(pat, pat, pat, pat, pat);
     }
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const orderBy = ({
+      playtime: 'total_active_ms DESC, last_seen_at DESC',
+      games: 'total_games DESC, last_seen_at DESC',
+      created: 'created_at DESC',
+      recent: 'last_seen_at DESC',
+    })[sort] || 'last_seen_at DESC';
+    // Subqueries аггрегируют per-user: total_active_ms, favorite_vibe, favorite_game.
+    // Для текущего объёма (десятки юзеров) — OK; на тысячах нужно денормализовать в users.
     const [rs, total] = await Promise.all([
       env.DB.prepare(
-        `SELECT tg_id, username, first_name, last_name, display_name, emoji, photo_url, is_premium,
-                total_games, total_wins, total_score, default_vibe, premium_until, language_code,
-                created_at, last_seen_at
-         FROM users ${whereSql} ORDER BY last_seen_at DESC LIMIT ? OFFSET ?`
+        `SELECT u.tg_id, u.username, u.first_name, u.last_name, u.display_name, u.emoji, u.photo_url, u.is_premium,
+                u.total_games, u.total_wins, u.total_score, u.default_vibe, u.premium_until, u.language_code,
+                u.created_at, u.last_seen_at,
+                COALESCE((SELECT SUM(COALESCE(sp.active_ms,0))
+                          FROM session_players sp
+                          JOIN sessions s ON s.id = sp.session_id
+                          WHERE s.user_id = u.tg_id), 0) AS total_active_ms,
+                (SELECT vibe FROM sessions
+                  WHERE user_id = u.tg_id AND vibe IS NOT NULL AND vibe <> ''
+                  GROUP BY vibe ORDER BY COUNT(*) DESC, vibe LIMIT 1) AS favorite_vibe,
+                (SELECT game_id FROM sessions
+                  WHERE user_id = u.tg_id AND game_id IS NOT NULL AND game_id <> ''
+                  GROUP BY game_id ORDER BY COUNT(*) DESC, game_id LIMIT 1) AS favorite_game,
+                (SELECT COUNT(*) FROM sessions WHERE user_id = u.tg_id) AS session_count
+         FROM users u ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`
       ).bind(...args, limit, offset).all(),
-      env.DB.prepare(`SELECT COUNT(*) AS n FROM users ${whereSql}`).bind(...args).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM users u ${whereSql}`).bind(...args).first(),
     ]);
-    return adminJson({ ok: true, total: total?.n || 0, limit, offset, rows: rs.results || [] });
+    return adminJson({ ok: true, total: total?.n || 0, limit, offset, sort, rows: rs.results || [] });
   }
 
   if (method === 'PATCH' && idStr) {
@@ -2955,6 +3132,7 @@ export default {
       return new Response(null, { status: 301, headers: { Location: VAULT_PATH, 'Cache-Control': 'no-store' } });
     }
     // Admin API (D1-only)
+    if (url.pathname === ADMIN_PATH + '/issue-token' && method === 'GET') return handleAdminIssueToken(request, env);
     if (url.pathname === ADMIN_PATH + '/stats' && method === 'GET') return handleAdminStats(request, env);
     if (url.pathname === ADMIN_PATH + '/cards' && (method === 'GET' || method === 'POST')) return handleAdminCards(request, env, method, null);
     if (url.pathname === ADMIN_PATH + '/cards/bulk' && method === 'POST') return handleAdminCardsBulk(request, env);

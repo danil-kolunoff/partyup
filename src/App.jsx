@@ -4367,13 +4367,21 @@ function ProfileScreen({ auth, onReturnToGame }) {
         <button
           className="btn-secondary"
           style={{marginTop: 16, width: '100%'}}
-          onClick={() => {
-            // Открываем админку. Без токена — на стороне сервера проверится
-            // initData/cookie, для админа всё откроется.
-            const url = '/api/admin/vault'
-            const tg = window.Telegram?.WebApp
-            if (tg?.openLink) tg.openLink(window.location.origin + url, { try_instant_view: false })
-            else window.open(url, '_blank', 'noopener')
+          onClick={async () => {
+            // Mini App открывает внешний браузер через tg.openLink — он не
+            // несёт initData/cookie. Поэтому сначала просим у сервера токен
+            // (server проверит initData, что это реально админ), потом
+            // подставляем токен в URL.
+            try {
+              const r = await api.adminToken()
+              if (!r?.token) throw new Error(r?.error || 'no_token')
+              const url = `${window.location.origin}/api/admin/vault?token=${encodeURIComponent(r.token)}`
+              const tg = window.Telegram?.WebApp
+              if (tg?.openLink) tg.openLink(url, { try_instant_view: false })
+              else window.open(url, '_blank', 'noopener')
+            } catch (e) {
+              alert('Не удалось получить токен админки: ' + (e?.message || 'unknown'))
+            }
           }}
         >
           <ShieldCheck size={16}/> Открыть админку

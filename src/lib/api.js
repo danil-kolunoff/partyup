@@ -50,4 +50,7 @@ export const api = {
   roomJoin: (id, body) => post(`/api/room/${id}/join`, body),
   roomAction: (id, body) => post(`/api/room/${id}/action`, body),
   roomState: (id) => get(`/api/room/${id}/state`),
+  // Только админ — возвращает Vault-токен по initData/cookie. Используется
+  // для безопасного открытия админки во внешнем браузере из Mini App.
+  adminToken: () => get('/api/admin/issue-token'),
 };
