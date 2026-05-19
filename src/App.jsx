@@ -233,23 +233,25 @@ export default function App() {
   const [pickerRaw, setPickerRaw] = useState(() => {
     try { const s = sessionStorage.getItem('pu_picker'); return s ? JSON.parse(s) : { players: 'medium', vibe: 'warmup', duration: 'medium' } } catch { return { players: 'medium', vibe: 'warmup', duration: 'medium' } }
   })
-  // Burst-эффект при выборе вайба. burstEvent хранит id + origin (координаты кнопки).
+  // Burst-эффект при выборе вайба. Точка вылета — ВСЕГДА центр кнопки
+  // вайба в bottom-nav (независимо от того, откуда сменили вайб).
   const [vibeBurstEvent, setVibeBurstEvent] = useState({ id: 0, x: null, y: null })
-  const burstFromEvent = useCallback((evt) => {
+  const burstFromVibeBtn = useCallback(() => {
     let x = null, y = null
     try {
-      const el = evt?.currentTarget || evt?.target
-      const wrap = el?.closest?.('.vibe-scroll') || el
-      if (wrap?.getBoundingClientRect) {
-        const r = wrap.getBoundingClientRect()
+      const el = document.querySelector('.bnav-item.is-vibe')
+      if (el?.getBoundingClientRect) {
+        const r = el.getBoundingClientRect()
         x = r.left + r.width / 2
         y = r.top + r.height / 2
       }
     } catch {}
-    // Серия импактов синхронно с разлётом эмодзи — Taptic Engine «взрыв».
     hapticBurst('normal')
     setVibeBurstEvent(b => ({ id: b.id + 1, x, y }))
   }, [])
+  // Legacy alias — оставлен чтобы старые вызовы не падали (HomeScreen и др.
+  // передают onBurst, в новом дизайне он просто перенаправляет в bnav-точку).
+  const burstFromEvent = burstFromVibeBtn
   const picker = pickerRaw
   const setPicker = useCallback((update) => {
     setPickerRaw(prev => typeof update === 'function' ? update(prev) : update)
@@ -1005,14 +1007,7 @@ export default function App() {
             ev.vibeChange(v)
             setShowVibePicker(false)
             haptic('success')
-            // Разлёт эмодзи из центра bnav-кнопки вайба — единственное место,
-            // где играем burst. Чипы на главной/в сетапе тихо меняют вайб.
-            const el = document.querySelector('.bnav-item.is-vibe')
-            if (el?.getBoundingClientRect) {
-              const r = el.getBoundingClientRect()
-              hapticBurst('normal')
-              setVibeBurstEvent(b => ({ id: b.id + 1, x: r.left + r.width / 2, y: r.top + r.height / 2 }))
-            }
+            burstFromVibeBtn()
           }}
           onClose={() => setShowVibePicker(false)}
         />
@@ -1092,9 +1087,11 @@ function GameLobbySettings({ game, settings, setSettings, haptic }) {
 // Селектор количества карточек для PlayerSetup. Используется и в lobby через
 // GameLobbySettings — оба теперь рендерятся одинаковым стилем.
 function CardCountSelector({ game, settings, setSettings, style }) {
-  const isTruth = game?.id === 'truth'
-  const opts = isTruth ? [25, 50, 100] : [3, 5, 6, 10]
-  const label = isTruth ? 'Карточек в партии' : 'Раундов в партии'
+  // Универсальный выбор: 25/50/100 карточек для всех игр (единый UX).
+  // Игре-зависимый лейбл оставляем — где-то это «карточек», где-то «вопросов».
+  const opts = [25, 50, 100]
+  const label = ['never','whoofus','most','hot_seat'].includes(game?.id)
+    ? 'Вопросов в партии' : 'Карточек в партии'
   // По умолчанию выбирается наименьшее значение.
   useEffect(() => {
     setSettings(s => {
@@ -1144,7 +1141,8 @@ function VibeBurst({ vibe, burst }) {
       return
     }
     setActive(true)
-    const t = setTimeout(() => setActive(false), 3800)
+    // Короче: 1.6 c вместо 3.8 — эмодзи быстро улетают и не мешают тапать.
+    const t = setTimeout(() => setActive(false), 1600)
     return () => clearTimeout(t)
   }, [burstId, vibe])
 
@@ -1210,7 +1208,10 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
     <nav className="bottom-nav" role="navigation" aria-label="Главное меню">
       {NAV_ITEMS.map(item => {
         if (item.id === '__VIBE__') {
-          // Центральный слот — индикатор текущего вайба + кнопка смены.
+          // Центральный слот — только иконка вайба (название не помещалось
+          // для «Близкие друзья» и др.). Цветная индикация = текущий вайб,
+          // кружок-индикатор внизу, под иконкой подпись «Вайб» как у других
+          // слотов (короткая, всегда одна и та же).
           return (
             <button
               key="vibe"
@@ -1220,8 +1221,8 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
               onClick={onOpenVibePicker}
               aria-label={`Сменить вайб (сейчас: ${vibe.label})`}
             >
-              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={16}/></span>
-              <span className="bnav-vibe-label">{vibe.label}</span>
+              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={22}/></span>
+              <span className="bnav-vibe-label">Вайб</span>
             </button>
           )
         }
@@ -1554,8 +1555,7 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
     setPicker(p => ({ ...p, vibe: vibeId }))
     ev.vibeChange(vibeId)
     setVibeToast(true)
-    // Burst-эффект играется ТОЛЬКО из центральной кнопки в bottom-nav,
-    // здесь — тихая смена вайба.
+    onBurst?.() // burst всегда из центра bnav-кнопки (см. App.burstFromVibeBtn)
   }
 
   const confirmAdult = () => {
@@ -1564,6 +1564,7 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
     ev.vibeChange(v)
     setShowAdultModal(null)
     setVibeToast(true)
+    onBurst?.()
   }
 
   return (
@@ -2264,7 +2265,7 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSetting
       )}
 
       {/* Вайб (открывает тот же модал что в bottom-nav) и кол-во карточек. */}
-      <div className="setup-axis-card">
+      <div className="setup-axis-card" style={{marginTop: 18}}>
         <button className="setup-axis-row" onClick={() => setShowVibe(true)}>
           <div className="setup-axis-key"><VibeIcon vibeId={vibe.id} size={16}/> Вайб</div>
           <div className="setup-axis-val">{vibe.label} <ChevronRight size={14}/></div>
@@ -2891,7 +2892,7 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
       <div className="prompt-card">
         <div className="prompt-type"><Sparkles size={12}/> Я никогда не…</div>
         <div className="prompt-text">…{round.promptText}</div>
-        <div className="prompt-player" style={{marginTop:12}}>Поднимите руку, если делали это:</div>
+        <div className="prompt-player" style={{marginTop:12}}>Признайтесь, если делали это:</div>
       </div>
 
       <div className="never-player-list">
@@ -4272,49 +4273,94 @@ const podiumMedals = ['🏆', '🥈', '🥉']
   const podiumLabels = ['Победитель', 'Второе место', 'Третье место']
   const top3 = ranked.slice(0, 3)
 
+  // Игре-зависимый «титул» победителя: одна строчка, которая делает
+  // карточку личной для каждой игры.
+  const GAME_WINNER_TAGLINE = {
+    truth:        { title: 'Самый смелый', sub: 'Принял все вызовы вечера' },
+    never:        { title: 'Самая богатая жизнь', sub: 'Опыта — больше всех' },
+    whoofus:      { title: 'Звезда компании', sub: 'Все указали именно на него' },
+    most:         { title: 'Главный герой', sub: 'Самый вероятный кандидат' },
+    five:         { title: 'Самый быстрый ум', sub: 'Без пауз и запинок' },
+    associations: { title: 'Думает как все', sub: 'Идеальное чувство компании' },
+  }
+  const tagline = GAME_WINNER_TAGLINE[game.id] || { title: 'Главный герой вечера', sub: game.title }
+  const winner = ranked[0]
+
   return (
-    <div>
-      <div className="results-hero">
-        <span className="results-trophy" role="img" aria-label="Победа">🎊</span>
-        <h2 className="gradient-text">Игра завершена!</h2>
-        <p className="lead">Отличная вечеринка — {game.title}</p>
+    <div className="results-v2">
+      <div className="results-v2-eyebrow">
+        <Trophy size={13}/> Игра завершена · {game.title}
       </div>
 
-      {hasScores ? (
-        <>
-          <div className="results-cards">
-            {ranked.slice(0, 3).map((p, i) => (
-              <div key={p.id} className={`result-item ${i === 0 ? 'result-winner' : ''}`}>
-                <span className="result-medal">{podiumMedals[i]}</span>
-                <div style={{flex:1}}>
-                  <div className="result-label">{podiumLabels[i]}</div>
-                  <div className="result-value">{p.emoji} {p.name}</div>
-                </div>
-                <div className="result-score-badge">{scores[p.id] || 0} <span style={{fontSize:11,opacity:0.7}}>оч.</span></div>
-              </div>
-            ))}
+      {/* Социальная карточка победителя — это «трофей», на который хочется
+          смотреть и которым хочется поделиться. */}
+      {winner && (
+        <div className="winner-card" data-vibe={winner.id}>
+          <div className="winner-card-bg" aria-hidden="true"/>
+          <div className="winner-card-confetti" aria-hidden="true">
+            <span>🏆</span><span>✨</span><span>🎉</span><span>⭐</span><span>💫</span>
           </div>
-          {ranked.length > 3 && (
-            <div className="results-full-table">
-              {ranked.slice(3).map((p, i) => (
-                <div key={p.id} className="results-row">
-                  <span className="results-row-rank">{i + 4}</span>
-                  <span className="results-row-emoji">{p.emoji}</span>
-                  <span className="results-row-name">{p.name}</span>
-                  <span className="results-row-score">{scores[p.id] || 0} оч.</span>
-                </div>
-              ))}
+          <div className="winner-card-content">
+            <div className="winner-card-label">
+              <Crown size={13}/> {hasScores ? 'Победитель' : tagline.title}
             </div>
-          )}
-        </>
-      ) : (
-        <TitlesBoard players={players} game={game}/>
+            <div className="winner-avatar-wrap">
+              <PlayerAvatar player={winner} auth={null} myId={null} size={96} className="winner-avatar"/>
+            </div>
+            <div className="winner-card-name">{winner.name}</div>
+            <div className="winner-card-tagline">{hasScores ? tagline.title : tagline.sub}</div>
+            {hasScores && (
+              <div className="winner-card-score">
+                <span className="winner-card-score-n">{scores[winner.id] || 0}</span>
+                <span className="winner-card-score-l">очков</span>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
-      {/* Share block */}
-      <div className="share-card">
-        <p className="share-card-title">Поделись итогами 🎉</p>
-        <p className="share-card-sub">Отправь результаты в чат — пусть все завидуют</p>
+      {/* Подиум 2-3 место в виде компактных «социальных» аватарок */}
+      {ranked.length > 1 && hasScores && (
+        <div className="podium-row">
+          {[1, 2].map(idx => {
+            const p = ranked[idx]; if (!p) return null
+            return (
+              <div key={p.id} className={`podium-card podium-${idx + 1}`}>
+                <div className="podium-medal">{podiumMedals[idx]}</div>
+                <PlayerAvatar player={p} auth={null} myId={null} size={56} className="podium-avatar"/>
+                <div className="podium-name">{p.name}</div>
+                <div className="podium-score">{scores[p.id] || 0} оч.</div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Полный список — компактно, остальные ниже подиума */}
+      {hasScores && ranked.length > 3 && (
+        <div className="results-full-table" style={{marginTop: 14}}>
+          {ranked.slice(3).map((p, i) => (
+            <div key={p.id} className="results-row">
+              <span className="results-row-rank">{i + 4}</span>
+              <PlayerAvatar player={p} auth={null} myId={null} size={28} className="results-row-avatar"/>
+              <span className="results-row-name">{p.name}</span>
+              <span className="results-row-score">{scores[p.id] || 0} оч.</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Если очков нет — выводим «титулы вечера» (TitlesBoard) ниже карточки. */}
+      {!hasScores && (
+        <div style={{marginTop: 14}}>
+          <TitlesBoard players={players} game={game}/>
+        </div>
+      )}
+
+      {/* Share block — компактнее, в стилистике карточки */}
+      <div className="share-card share-card-v2" style={{marginTop: 18}}>
+        <p className="share-card-title">Сохранить результат 🎉</p>
+        <p className="share-card-sub">Отправь в чат — пусть все завидуют</p>
         <button className="btn-primary no-pulse" onClick={shareResultsToTelegram} style={{opacity: shared ? 0.7 : 1}}>
           {shared ? <><Check size={17}/> Отправлено!</> : <><Send size={17}/> Поделиться в Telegram</>}
         </button>

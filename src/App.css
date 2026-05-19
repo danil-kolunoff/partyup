@@ -2516,32 +2516,27 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
    VIBE BURST — временный фейерверк эмодзи на 10 секунд при выборе вайба
 ════════════════════════════════════════════════ */
 .vibe-burst {
-  /* Самый задний план — за всем контентом приложения.
-     Header (z=10), .screen-frame (z=1), .bottom-nav (z=90) перекрывают burst. */
-  position: fixed; inset: 0; z-index: 0;
+  /* ПОВЕРХ всего — эмодзи летят на переднем плане, видны над контентом
+     и над bnav (z=90), но pointer-events:none — клики не перехватывают. */
+  position: fixed; inset: 0; z-index: 9999;
   pointer-events: none; overflow: hidden;
-  animation: burstWrapFade 3.8s linear forwards;
-}
-@keyframes burstWrapFade {
-  0% { opacity: 1; } 100% { opacity: 1; }
 }
 .vibe-burst-em {
   position: absolute;
   opacity: 0; line-height: 1;
-  /* Центрируем эмодзи относительно (left, top), а не от верхнего-левого. */
   margin-left: -0.5em; margin-top: -0.5em;
-  filter: drop-shadow(0 6px 16px rgba(0,0,0,0.45));
+  filter: drop-shadow(0 6px 16px rgba(0,0,0,0.55));
   will-change: transform, opacity;
   user-select: none;
-  /* ease-out: разлёт из центра, замедление к концу, opacity тает одновременно. */
-  animation: burstFly 3.6s cubic-bezier(0.18, 0.7, 0.32, 1) forwards;
+  /* 1.4 c — быстрый, заметный, не мешает следующим тапам. */
+  animation: burstFly 1.4s cubic-bezier(0.22, 0.7, 0.32, 1) forwards;
   transform: translate3d(0, 0, 0) rotate(0) scale(0);
 }
 @keyframes burstFly {
   0%   { opacity: 0;    transform: translate3d(0, 0, 0) rotate(0deg) scale(0.3); }
-  12%  { opacity: 0.6;  transform: translate3d(calc(var(--dx) * 0.3), calc(var(--dy) * 0.3), 0) rotate(calc(var(--rot) * 0.3)) scale(var(--scl)); }
-  60%  { opacity: 0.35; transform: translate3d(calc(var(--dx) * 0.78), calc(var(--dy) * 0.78), 0) rotate(calc(var(--rot) * 0.75)) scale(calc(var(--scl) * 0.92)); }
-  100% { opacity: 0;    transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--rot)) scale(calc(var(--scl) * 0.7)); }
+  15%  { opacity: 1;    transform: translate3d(calc(var(--dx) * 0.35), calc(var(--dy) * 0.35), 0) rotate(calc(var(--rot) * 0.4)) scale(var(--scl)); }
+  70%  { opacity: 0.7;  transform: translate3d(calc(var(--dx) * 0.85), calc(var(--dy) * 0.85), 0) rotate(calc(var(--rot) * 0.85)) scale(calc(var(--scl) * 0.95)); }
+  100% { opacity: 0;    transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--rot)) scale(calc(var(--scl) * 0.75)); }
 }
 .vibe-burst[data-vibe="adult"] .vibe-burst-em,
 .vibe-burst[data-vibe="ultra_adult"] .vibe-burst-em,
@@ -2868,39 +2863,155 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 .lobby-change-game-btn:hover { background: rgba(167,139,250,0.25); }
 .lobby-change-game-btn:active { transform: scale(0.96); }
 
-/* Vibe button in bottom-nav — плоская pill-капсула в стиле приложения.
-   Никаких подъёмов и кружочков. Жидкий аврора-градиент, тонкая обводка
-   из accent-цвета, мягкий внутренний glow при hover/press. */
+/* Vibe button in bottom-nav — компактная иконка с цветным glow и подписью
+   «Вайб» внизу (как у других слотов). Не растягиваем под длинные названия
+   вайбов (типа «Близкие друзья») — они показываются в picker-модалке. */
 .bnav-item.is-vibe {
-  position: relative; display: inline-flex; align-items: center; gap: 7px;
-  padding: 8px 14px; min-height: 38px; margin: 4px 2px;
-  background: linear-gradient(135deg, rgba(167,139,250,0.16) 0%, rgba(124,58,237,0.20) 100%);
-  border: 1px solid rgba(167,139,250,0.40);
-  border-radius: 999px;
-  color: var(--accent-2); font: inherit; font-weight: 700; font-size: 12px;
-  cursor: pointer; overflow: hidden;
-  transition: background var(--fast), border-color var(--fast), transform var(--fast) var(--spring), box-shadow var(--fast);
+  position: relative; display: inline-flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px;
+  background: none; border: none; padding: 4px 8px;
+  color: var(--accent-2); font: inherit; font-weight: 600; font-size: 10px;
+  cursor: pointer;
+  transition: transform var(--fast) var(--spring);
 }
-/* Sheen — медленно проезжающий блик. Делает кнопку «живой» без раздражающего
-   мигания. */
-.bnav-item.is-vibe::after {
-  content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.18) 50%, transparent 70%);
-  transform: translateX(-120%);
-  animation: vibe-sheen 5.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+.bnav-item.is-vibe:active { transform: scale(0.92); }
+.bnav-vibe-icon {
+  position: relative;
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: radial-gradient(circle at 30% 30%, rgba(167,139,250,0.45) 0%, rgba(124,58,237,0.25) 60%, transparent 100%);
+  color: var(--accent-2);
+  transition: background var(--fast);
 }
-.bnav-item.is-vibe:hover {
-  background: linear-gradient(135deg, rgba(167,139,250,0.24) 0%, rgba(124,58,237,0.32) 100%);
-  border-color: rgba(167,139,250,0.65);
-  box-shadow: 0 4px 14px rgba(124,58,237,0.30);
+/* Soft pulsing aura — единственный «живой» эффект, без раздражения. */
+.bnav-vibe-icon::before {
+  content: ''; position: absolute; inset: -4px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(167,139,250,0.30) 0%, transparent 60%);
+  filter: blur(6px); pointer-events: none;
+  animation: vibe-pulse 4s ease-in-out infinite;
 }
-.bnav-item.is-vibe:active { transform: scale(0.97); }
-.bnav-vibe-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--accent-2); }
+@keyframes vibe-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.92); }
+  50%      { opacity: 0.95; transform: scale(1.08); }
+}
+.bnav-item.is-vibe:hover .bnav-vibe-icon {
+  background: radial-gradient(circle at 30% 30%, rgba(167,139,250,0.60) 0%, rgba(124,58,237,0.40) 60%, transparent 100%);
+}
+/* Per-vibe accent (тонкая подсветка для adult). */
+.bnav-item.is-vibe[data-vibe="adult"] .bnav-vibe-icon,
+.bnav-item.is-vibe[data-vibe="ultra_adult"] .bnav-vibe-icon {
+  background: radial-gradient(circle at 30% 30%, rgba(244,114,182,0.50) 0%, rgba(190,24,93,0.30) 60%, transparent 100%);
+  color: #f472b6;
+}
+.bnav-item.is-vibe[data-vibe="adult"] .bnav-vibe-icon::before,
+.bnav-item.is-vibe[data-vibe="ultra_adult"] .bnav-vibe-icon::before {
+  background: radial-gradient(circle, rgba(244,114,182,0.40) 0%, transparent 60%);
+}
 .bnav-vibe-label { letter-spacing: 0.02em; white-space: nowrap; }
-@keyframes vibe-sheen {
-  0%, 70%  { transform: translateX(-120%); }
-  100%     { transform: translateX(120%); }
+
+/* ════════════════════════════════════════════════
+   RESULTS v2 — социальная карточка победителя
+════════════════════════════════════════════════ */
+.results-v2 { padding-bottom: 20px; }
+.results-v2-eyebrow {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--accent-2);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 12px;
 }
+.winner-card {
+  position: relative; overflow: hidden;
+  border-radius: var(--r-2xl);
+  border: 1px solid rgba(167,139,250,0.50);
+  background: linear-gradient(135deg, #2a1b4a 0%, #4c1d95 35%, #7c3aed 100%);
+  padding: 26px 22px 22px;
+  box-shadow: 0 18px 48px rgba(124,58,237,0.40), 0 6px 16px rgba(0,0,0,0.4);
+  animation: winnerCardIn 0.6s var(--spring) both;
+}
+@keyframes winnerCardIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+.winner-card-bg {
+  position: absolute; inset: -40%;
+  background: conic-gradient(from 0deg, rgba(255,255,255,0.10), transparent 25%, rgba(244,114,182,0.18), transparent 60%, rgba(167,139,250,0.20), transparent 90%, rgba(255,255,255,0.10));
+  filter: blur(40px);
+  animation: winnerSpin 18s linear infinite;
+  pointer-events: none;
+}
+@keyframes winnerSpin { to { transform: rotate(360deg); } }
+.winner-card-confetti {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0.32;
+  font-size: 22px;
+}
+.winner-card-confetti span {
+  position: absolute; animation: confettiFloat 6s ease-in-out infinite;
+  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
+}
+.winner-card-confetti span:nth-child(1) { top: 12%;  left: 10%; animation-delay: 0s; }
+.winner-card-confetti span:nth-child(2) { top: 22%;  right: 14%; animation-delay: 1.2s; }
+.winner-card-confetti span:nth-child(3) { bottom: 24%; left: 16%; animation-delay: 2.4s; }
+.winner-card-confetti span:nth-child(4) { bottom: 18%; right: 12%; animation-delay: 0.6s; }
+.winner-card-confetti span:nth-child(5) { top: 50%;  left: 50%; animation-delay: 1.8s; }
+@keyframes confettiFloat {
+  0%, 100% { transform: translate(0,0) rotate(0); }
+  50%      { transform: translate(0,-10px) rotate(15deg); }
+}
+.winner-card-content { position: relative; z-index: 2; text-align: center; }
+.winner-card-label {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.25);
+  color: #fff; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.winner-avatar-wrap {
+  display: flex; justify-content: center;
+  margin: 14px 0 12px;
+}
+.winner-avatar {
+  border: 4px solid rgba(255,255,255,0.75);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.40), 0 0 0 2px rgba(167,139,250,0.50);
+  background: rgba(0,0,0,0.30);
+}
+.winner-card-name {
+  font-size: 26px; font-weight: 800; color: #fff;
+  letter-spacing: -0.01em;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.40);
+}
+.winner-card-tagline {
+  font-size: 14px; color: rgba(255,255,255,0.80); margin-top: 4px;
+}
+.winner-card-score {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  margin-top: 12px; padding: 8px 18px;
+  background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.30);
+  border-radius: 14px;
+  backdrop-filter: blur(6px);
+}
+.winner-card-score-n { font-size: 28px; font-weight: 800; color: #fff; line-height: 1; }
+.winner-card-score-l { font-size: 12px; color: rgba(255,255,255,0.85); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* Подиум 2-3 место */
+.podium-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px;
+}
+.podium-card {
+  background: var(--s2); border: 1px solid var(--border); border-radius: var(--r-lg);
+  padding: 16px 12px 14px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.podium-2 { background: linear-gradient(135deg, rgba(192,192,192,0.10), var(--s2) 60%); }
+.podium-3 { background: linear-gradient(135deg, rgba(205,127,50,0.10), var(--s2) 60%); }
+.podium-medal { font-size: 24px; line-height: 1; }
+.podium-avatar { border: 2px solid var(--accent-border); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.podium-name { font-weight: 700; font-size: 14px; color: var(--text); }
+.podium-score { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Полный список — компактные строки с настоящими аватарками */
+.results-row-avatar { box-shadow: none !important; border: 1px solid var(--border); }
+
+.share-card-v2 { padding: 18px 18px 16px; }
 
 /* Vibe / Game picker modal grid */
 .vibe-picker-modal { padding: 20px 18px 18px; }
