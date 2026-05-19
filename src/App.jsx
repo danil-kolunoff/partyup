@@ -2096,7 +2096,7 @@ function GameDetailScreen({ game, onPickMode }) {
         <h2>{game.title}</h2>
         <p className="lead">{game.short}</p>
         <div className="game-meta-row">
-          <span className="tag"><Users size={11}/> {game.players} чел.</span>
+          <span className="tag"><Users size={11}/> 2+ чел.</span>
           <span className="tag"><Clock size={11}/> ~{game.durationMin} мин</span>
           <span className="tag">
             Интенсивность:&nbsp;
