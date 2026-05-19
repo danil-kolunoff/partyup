@@ -765,6 +765,14 @@ export class GameRoom {
       const room = await this.state.storage.get('room');
       if (!room) return corsJson({ error: 'room_not_found' }, 404);
       if (body.state !== undefined) room.state = body.state;
+      if (body.gameId !== undefined) {
+        // Хост сменил игру в лобби. Сбрасываем round-state и индекс — это
+        // фактически новая партия с теми же игроками. Версия инкрементится,
+        // гости через ETag/poll получат свежие данные и подхватят новую игру.
+        room.gameId = String(body.gameId);
+        room.roundIndex = 0;
+        room.round = null;
+      }
       if (body.roundIndex !== undefined) {
         // Сменился индекс раунда — сбрасываем round-state.
         room.roundIndex = body.roundIndex;

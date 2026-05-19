@@ -261,6 +261,8 @@ export default function App() {
   const [roomRoundState, setRoomRoundState] = useState(null)
   // Флаг: профиль открыт из игры? Если да — показываем «Вернуться в игру».
   const [profileFromGame, setProfileFromGame] = useState(false)
+  const [showVibePicker, setShowVibePicker] = useState(false)
+  const [focusJoinInput, setFocusJoinInput] = useState(false)
   // Краткая карточка чужого игрока (когда у него нет TG username и это не «я»).
   const [viewedPlayer, setViewedPlayer] = useState(null)
 
@@ -775,41 +777,46 @@ export default function App() {
             onAllGames={() => navigate(SCREENS.GAMES)}
             onBurst={burstFromEvent} />}
         {screen === SCREENS.GAMES &&
-          <GamesScreen picker={picker} setPicker={setPicker} onGame={openGame} onBurst={burstFromEvent} />}
-        {screen === SCREENS.CREATE_LOBBY &&
-          <CreateLobbyScreen
-            picker={picker} setPicker={setPicker}
-            settings={settings} setSettings={setSettings}
-            myName={displayName(auth, null)}
-            onBurst={burstFromEvent}
-            onCreate={(gameId) => {
-              setSelectedGameId(gameId)
-              const game = GAMES.find(g => g.id === gameId) || GAMES[0]
-              // Имя хоста: реальное TG-имя / ник сессии / последнее сохранённое.
-              const myName = displayName(auth, null) ||
-                (typeof localStorage !== 'undefined' && localStorage.getItem('pu_my_name')) ||
-                'Хост'
-              createLobby([myName], 'multiplayer', game)
-            }}
-            onEnterRoom={(code) => {
+          <GamesScreen
+            onGame={openGame}
+            onEnterLobby={() => { setFocusJoinInput(true); navigate(SCREENS.FRIENDS) }}
+          />}
+        {screen === SCREENS.FRIENDS &&
+          <FriendsScreen
+            focusJoinInput={focusJoinInput}
+            onClearFocus={() => setFocusJoinInput(false)}
+            onJoinRoom={(code) => {
               setRoomId(code.toUpperCase())
               navigate(SCREENS.JOIN_ROOM)
             }}
-            haptic={haptic}
           />}
-        {screen === SCREENS.FRIENDS &&
-          <FriendsScreen />}
         {screen === SCREENS.PICKER &&
           <PickerScreen picker={picker} setPicker={setPicker} recommendations={recommendations} onSelect={openGame} />}
         {screen === SCREENS.DETAIL &&
-          <GameDetailScreen game={selectedGame} onSetup={() => navigate(SCREENS.PLAYER_SETUP)} />}
+          <GameDetailScreen
+            game={selectedGame}
+            onPickMode={(mode) => {
+              setPendingMode(mode)
+              if (mode === 'multiplayer') {
+                // Multiplayer: имя берём из TG/localStorage, сразу создаём лобби
+                // (минуем экран ввода игроков — настройки игроков в лобби).
+                const stored = (typeof localStorage !== 'undefined' && localStorage.getItem('pu_my_name')) || ''
+                const me = sanitizeName(displayName(auth, null) || stored, 32) || 'Хост'
+                createLobby([me], 'multiplayer', selectedGame)
+              } else {
+                navigate(SCREENS.PLAYER_SETUP)
+              }
+            }}
+          />}
         {screen === SCREENS.PLAYER_SETUP &&
           <PlayerSetupScreen
             game={selectedGame}
             myName={displayName(auth, null)}
-            initialMode={pendingMode}
             settings={settings}
             setSettings={setSettings}
+            picker={picker}
+            setPicker={setPicker}
+            haptic={haptic}
             auth={auth}
             onAvatarClick={() => navigate(SCREENS.PROFILE)}
             onStart={(names, mode) => {
@@ -827,6 +834,13 @@ export default function App() {
             onToggleReady={togglePlayerReady} onAllReady={setAllReady}
             onSettings={() => navigate(SCREENS.SETTINGS)}
             currentVibe={picker.vibe} onChangeVibe={v => setPicker(p => ({...p, vibe:v}))}
+            onChangeGame={(newGameId) => {
+              setSelectedGameId(newGameId)
+              if (isMultiplayer && roomId) {
+                // Сообщаем серверу — гости подтянут смену через polling.
+                api.roomAction(roomId, { gameId: newGameId }).catch(() => {})
+              }
+            }}
             haptic={haptic}
             isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
             onRoomPlayersUpdate={(updatedPlayers) => setRoom(r => r ? { ...r, players: updatedPlayers } : r)}
@@ -890,6 +904,25 @@ export default function App() {
         {screen === SCREENS.RESULTS &&
           <ResultsScreen game={selectedGame} players={players}
             scores={scores}
+            isMultiplayer={isMultiplayer}
+            isHost={isHost}
+            roomId={roomId}
+            onHostNavigated={(serverState) => {
+              if (serverState === 'lobby') { setRoundIndex(0); setScores({}); setRoomRoundState(null); navigate(SCREENS.LOBBY) }
+              else if (serverState === 'playing') { setRoundIndex(0); setRoomRoundState(null); navigate(SCREENS.ROUND) }
+            }}
+            onBackToLobby={async () => {
+              // Возврат в то же лобби: roomId сохраняем, state='lobby',
+              // round-state и индекс сбрасываем. Все гости через poll увидят
+              // переход и навигатор сам вернёт их в лобби (gameStartedByHost
+              // триггерится наоборот при 'playing'; здесь мы делаем явный
+              // setScreen). В локальной игре просто возвращаемся в лобби.
+              setRoundIndex(0); setScores({}); setRoomRoundState(null); setSessionDbId(null)
+              if (isMultiplayer && roomId) {
+                try { await api.roomAction(roomId, { state: 'lobby', roundIndex: 0, round: null }) } catch {}
+              }
+              navigate(SCREENS.LOBBY)
+            }}
             onAgain={async () => {
               setRoundIndex(0); setScores({}); setRoomRoundState(null); setSessionDbId(null)
               // Регистрируем НОВУЮ сессию в БД — чтобы аналитика считала это отдельной партией.
@@ -953,8 +986,25 @@ export default function App() {
       </main>
 
       {/* BottomNav статичный — виден на всех экранах */}
-      <BottomNav screen={screen} onNavigate={(s) => { haptic(); navigate(s) }} />
+      <BottomNav
+        screen={screen}
+        onNavigate={(s) => { haptic(); navigate(s) }}
+        currentVibe={picker.vibe}
+        onOpenVibePicker={() => { haptic(); setShowVibePicker(true) }}
+      />
 
+      {showVibePicker && (
+        <VibePickerModal
+          currentVibe={picker.vibe}
+          onPick={(v) => {
+            setPicker(p => ({ ...p, vibe: v }))
+            ev.vibeChange(v)
+            setShowVibePicker(false)
+            haptic('success')
+          }}
+          onClose={() => setShowVibePicker(false)}
+        />
+      )}
 
       {showWelcome && <WelcomeModal onClose={dismissWelcome} />}
       {viewedPlayer && <ViewedPlayerModal player={viewedPlayer} onClose={() => setViewedPlayer(null)} />}
@@ -1135,33 +1185,93 @@ function VibeBurst({ vibe, burst }) {
 
 /* ─── BottomNav — фикс-меню снизу ────────────────────────────────────────── */
 const NAV_ITEMS = [
-  { id: SCREENS.HOME,         label: 'Дом',     Icon: Home },
-  { id: SCREENS.GAMES,        label: 'Игры',    Icon: Dices },
-  { id: SCREENS.CREATE_LOBBY, label: 'Лобби',   Icon: PartyPopper, accent: true },
-  { id: SCREENS.FRIENDS,      label: 'Друзья',  Icon: Users },
+  { id: SCREENS.HOME,         label: 'Дом',       Icon: Home },
+  { id: SCREENS.GAMES,        label: 'Играть',    Icon: Dices },
+  { id: '__VIBE__',           label: 'Вайб',      Icon: Sparkles, accent: true }, // спец-слот
+  { id: SCREENS.FRIENDS,      label: 'Друзья',    Icon: Users },
   { id: SCREENS.SETTINGS,     label: 'Настройки', Icon: Settings },
 ]
 
-function BottomNav({ screen, onNavigate }) {
+function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
+  const vibe = VIBES.find(v => v.id === currentVibe) || VIBES[0]
   return (
     <nav className="bottom-nav" role="navigation" aria-label="Главное меню">
       {NAV_ITEMS.map(item => {
+        if (item.id === '__VIBE__') {
+          // Центральный слот — индикатор текущего вайба + кнопка смены.
+          return (
+            <button
+              key="vibe"
+              type="button"
+              className="bnav-item is-vibe"
+              data-vibe={vibe.id}
+              onClick={onOpenVibePicker}
+              aria-label={`Сменить вайб (сейчас: ${vibe.label})`}
+            >
+              <span className="bnav-vibe-glow" aria-hidden="true"/>
+              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={22}/></span>
+              <span className="bnav-vibe-label">{vibe.label}</span>
+            </button>
+          )
+        }
         const active = item.id === screen
         const { Icon } = item
         return (
           <button
             key={item.id}
             type="button"
-            className={`bnav-item ${active ? 'is-active' : ''} ${item.accent ? 'is-accent' : ''}`}
+            className={`bnav-item ${active ? 'is-active' : ''}`}
             aria-current={active ? 'page' : undefined}
             onClick={() => onNavigate(item.id)}
           >
-            <span className="bnav-ico"><Icon size={item.accent ? 24 : 20}/></span>
+            <span className="bnav-ico"><Icon size={20}/></span>
             <span className="bnav-lbl">{item.label}</span>
           </button>
         )
       })}
     </nav>
+  )
+}
+
+/* ─── VibePickerModal — крупный, центральный, в один тап ────────────────── */
+function VibePickerModal({ currentVibe, onPick, onClose }) {
+  const [showAdult, setShowAdult] = useState(null)
+  const pick = (id) => {
+    if ((id === 'adult' || id === 'ultra_adult') && id !== currentVibe) { setShowAdult(id); return }
+    onPick(id)
+  }
+  const confirmAdult = () => { onPick(showAdult); setShowAdult(null) }
+  return (
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Выбор вайба">
+      <div className="welcome-modal vibe-picker-modal" onClick={e => e.stopPropagation()}>
+        <p className="eyebrow" style={{justifyContent: 'center'}}><Sparkles size={13}/> Вайб компании</p>
+        <h2 className="gradient-text" style={{textAlign: 'center', margin: '4px 0 4px'}}>На что настраиваемся?</h2>
+        <p className="lead" style={{textAlign: 'center', marginBottom: 18}}>
+          Влияет на <b>вопросы, задания и тон</b> карточек во всех играх.
+        </p>
+        <div className="vibe-picker-grid">
+          {VIBES.map(v => (
+            <button
+              key={v.id}
+              className={`vibe-picker-tile ${v.id === currentVibe ? 'is-active' : ''}`}
+              data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+              onClick={() => pick(v.id)}
+            >
+              <span className="vibe-picker-icon"><VibeIcon vibeId={v.id} size={28}/></span>
+              <span className="vibe-picker-label">{v.label}</span>
+              <span className="vibe-picker-hint">{v.hint}</span>
+              {v.id === currentVibe && <Check size={14} className="vibe-picker-check"/>}
+            </button>
+          ))}
+        </div>
+        <button className="btn-ghost" style={{width: '100%', justifyContent: 'center', marginTop: 18}} onClick={onClose}>
+          <X size={15}/> Закрыть
+        </button>
+        {showAdult && (
+          <AdultWarningModal vibe={showAdult} onConfirm={confirmAdult} onCancel={() => setShowAdult(null)}/>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -1496,15 +1606,14 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
         </div>
       </div>
 
-      {/* Top 5 без категорий */}
+      {/* Только простые игры — остальные временно скрыты до доработки */}
       <div className="game-list" style={{marginTop: 12}}>
-        {GAMES.slice(0, 5).map((g, i) => (
+        {GAMES.filter(g => g.simple).map((g, i) => (
           <GameRowItem key={g.id} g={g} onGame={onGame}
             style={{animationDelay:`${i * 0.04}s`}}/>
         ))}
       </div>
 
-      {/* Все игры */}
       <PressBtn className="btn-all-games" onClick={onAllGames} delay={160}>
         <span>Все игры</span>
         <ChevronRight size={16}/>
@@ -1553,44 +1662,32 @@ function VibeMiniBar({ picker, onPickVibe, showLabel = true }) {
   )
 }
 
-/* ─── GamesScreen — полный каталог по категориям + мини вайб-чипы ───────── */
-function GamesScreen({ picker, setPicker, onGame, onBurst }) {
-  const [showAdultModal, setShowAdultModal] = useState(null)
-  const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
-  const handleVibe = (vibeId, evt) => {
-    if (vibeId === picker.vibe) { onBurst?.(evt); return }
-    if (vibeId === 'adult' || vibeId === 'ultra_adult') {
-      setPendingAdultEvt(evt); setShowAdultModal(vibeId); return
-    }
-    setPicker(p => ({ ...p, vibe: vibeId }))
-    ev.vibeChange(vibeId)
-    onBurst?.(evt)
-  }
-  const confirmAdult = () => {
-    const v = showAdultModal
-    setPicker(p => ({ ...p, vibe: v }))
-    ev.vibeChange(v)
-    setShowAdultModal(null)
-    onBurst?.(pendingAdultEvt)
-  }
+/* ─── GamesScreen — каталог простых игр (категории/вайб временно скрыты) ── */
+function GamesScreen({ onGame, onEnterLobby }) {
+  // Пока показываем только «simple» игры. Остальные не удалены — просто
+  // спрятаны до доработки. Категории и выбор вайба тоже спрятаны: вайб
+  // живёт в нижнем меню, выбор игры — в один тап из общего списка.
+  const simple = GAMES.filter(g => g.simple)
   return (
     <div>
-      <p className="eyebrow"><Dices size={13}/> Каталог</p>
-      <h2 style={{marginBottom: 14}}>Игры по категориям</h2>
-
-      <VibeMiniBar picker={picker} onPickVibe={handleVibe}/>
-
-      <div style={{marginTop: 16}}>
-        <GameSections onGame={onGame}/>
+      <div className="row" style={{marginBottom: 14, alignItems: 'flex-start'}}>
+        <div style={{flex: 1, minWidth: 0}}>
+          <p className="eyebrow"><Dices size={13}/> Все игры</p>
+          <h2 style={{marginBottom: 4}}>Выбирай и играй</h2>
+          <p className="lead" style={{margin: 0}}>На одном телефоне или вместе по сети — за пару тапов.</p>
+        </div>
+        <button className="btn-secondary" style={{flexShrink: 0, padding: '8px 14px', minHeight: 0}}
+          onClick={onEnterLobby}>
+          <UserPlus size={14}/> Войти в лобби
+        </button>
       </div>
 
-      {showAdultModal && (
-        <AdultWarningModal
-          vibe={showAdultModal}
-          onConfirm={confirmAdult}
-          onCancel={() => setShowAdultModal(null)}
-        />
-      )}
+      <div className="game-list">
+        {simple.map((g, i) => (
+          <GameRowItem key={g.id} g={g} onGame={onGame}
+            style={{animationDelay: `${i * 0.04}s`}}/>
+        ))}
+      </div>
     </div>
   )
 }
@@ -1736,9 +1833,22 @@ function CreateLobbyScreen({ picker, setPicker, settings, setSettings, myName, o
 }
 
 /* ─── FriendsScreen — приглашение + список соигроков ─────────────────────── */
-function FriendsScreen() {
+function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
   const [friends, setFriends] = useState([])
   const [loading, setLoading] = useState(true)
+  const [code, setCode] = useState('')
+  const joinInputRef = useRef(null)
+  useEffect(() => {
+    if (focusJoinInput && joinInputRef.current) {
+      joinInputRef.current.focus()
+      onClearFocus?.()
+    }
+  }, [focusJoinInput, onClearFocus])
+  const tryJoin = () => {
+    const c = (code || '').trim().toUpperCase()
+    if (!/^[A-Z0-9]{4,8}$/.test(c)) return
+    onJoinRoom?.(c)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -1778,6 +1888,33 @@ function FriendsScreen() {
           <PressBtn className="btn-primary" style={{width:'100%', marginTop: 12}} onClick={invite} delay={140}>
             <Share2 size={16}/> Поделиться
           </PressBtn>
+        </div>
+      </div>
+
+      {/* Войти в комнату */}
+      <div className="card friends-card" style={{marginTop: 12}}>
+        <div className="friends-card-icon"><Key size={20}/></div>
+        <div className="friends-card-body">
+          <div className="friends-card-title">Войти в комнату</div>
+          <div className="friends-card-desc">У друга есть код лобби? Введи его, чтобы присоединиться.</div>
+          <div className="row" style={{marginTop: 12, gap: 8}}>
+            <input
+              ref={joinInputRef}
+              className="setup-player-input"
+              style={{flex: 1, textTransform: 'uppercase', letterSpacing: '2px', textAlign: 'center', fontSize: 16, fontWeight: 700}}
+              placeholder="A1B2C3"
+              value={code}
+              onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))}
+              onKeyDown={e => { if (e.key === 'Enter') tryJoin() }}
+              maxLength={8}
+              autoCapitalize="characters"
+            />
+            <button className="btn-primary" style={{flexShrink: 0, padding: '0 16px'}}
+              disabled={!/^[A-Z0-9]{4,8}$/.test(code.trim())}
+              onClick={tryJoin}>
+              <Play size={15}/> Войти
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1937,7 +2074,7 @@ function RecommendResults({ recommendations, onSelect, onReset }) {
 }
 
 /* ─── GameDetailScreen ───────────────────────────────────────────────────── */
-function GameDetailScreen({ game, onSetup }) {
+function GameDetailScreen({ game, onPickMode }) {
   return (
     <div className="game-detail-screen">
       <div className="game-hero">
@@ -1974,9 +2111,20 @@ function GameDetailScreen({ game, onSetup }) {
         </div>
       </div>
 
-      <div className="game-detail-cta">
-        <button className="btn-primary" onClick={onSetup}>
-          <Play size={17}/> Играть
+      {/* Выбор режима — две крупные карточки с характером, а не просто кнопки. */}
+      <p className="eyebrow" style={{marginTop: 14, marginBottom: 10}}><Play size={12}/> Как играем</p>
+      <div className="mode-card-grid">
+        <button className="mode-card mode-card-local" onClick={() => onPickMode('one_phone')}>
+          <div className="mode-card-icon"><Play size={26}/></div>
+          <div className="mode-card-title">Играть на одном телефоне</div>
+          <div className="mode-card-desc">Передаём телефон по кругу</div>
+          <span className="mode-card-arrow"><ChevronRight size={18}/></span>
+        </button>
+        <button className="mode-card mode-card-mp" onClick={() => onPickMode('multiplayer')}>
+          <div className="mode-card-icon"><Share2 size={26}/></div>
+          <div className="mode-card-title">Мультиплеер</div>
+          <div className="mode-card-desc">У каждого свой телефон</div>
+          <span className="mode-card-arrow"><ChevronRight size={18}/></span>
         </button>
       </div>
     </div>
@@ -1984,25 +2132,35 @@ function GameDetailScreen({ game, onSetup }) {
 }
 
 /* ─── PlayerSetupScreen ──────────────────────────────────────────────────── */
-function PlayerSetupScreen({ game, onStart, onBack, myName, initialMode, settings, setSettings, auth, onAvatarClick }) {
-  // Если попали сюда из «Создать лобби» (initialMode='multiplayer'),
-  // пропускаем шаг выбора режима — игра уже подразумевается онлайн.
-  const [step, setStep] = useState(initialMode ? 1 : 0)
-  const [mode, setMode] = useState(initialMode || 'one_phone')
+// Single-player setup: режим уже выбран на DetailScreen, сразу вводим игроков,
+// + выбор вайба и кол-ва карточек. Имена/количество и вайб запоминаются в
+// localStorage и подставляются во все последующие single-сессии.
+const SINGLE_SETUP_KEY = 'pu_single_setup'
+function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSettings, auth, onAvatarClick, picker, setPicker, haptic }) {
   const PLACEHOLDER_ME = 'Вы'
   const cleanReal = (s) => {
     const x = sanitizeName(s || '', 32)
     return x === PLACEHOLDER_ME ? '' : x
   }
+  // Сохранённый сетап с прошлой сессии: имена/количество. Вайб берём из
+  // глобального picker.vibe (общий источник для всех экранов).
+  const savedSetup = (() => {
+    try { return JSON.parse(localStorage.getItem(SINGLE_SETUP_KEY) || 'null') } catch { return null }
+  })()
   const [names, setNames] = useState(() => {
     let initial = cleanReal(myName)
     if (!initial) {
       try { initial = cleanReal(localStorage.getItem('pu_my_name') || '') } catch {}
     }
-    // Если реального имени ещё нет — оставляем пустую строку, чтобы в инпуте
-    // отображался placeholder («Ваше имя» / «Игрок 1»), а не плейсхолдерное «Вы».
+    if (savedSetup?.names?.length >= 2) {
+      // Если у юзера уже есть TG-имя — первым ставим его, иначе берём как было.
+      return initial
+        ? [initial, ...savedSetup.names.slice(1)]
+        : savedSetup.names
+    }
     return [initial || '', 'Игрок 2', 'Игрок 3']
   })
+  const [showVibe, setShowVibe] = useState(false)
   // Поле 0 редактировано вручную?
   const firstEditedRef = useRef(false)
   useEffect(() => {
@@ -2010,23 +2168,6 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, initialMode, setting
     if (!real || firstEditedRef.current) return
     setNames(n => (n[0] === real ? n : [real, ...n.slice(1)]))
   }, [myName])
-
-  const modeOptions = [
-    {
-      id: 'one_phone',
-      icon: <Play size={22} color="var(--accent-2)"/>,
-      label: 'На одном телефоне',
-      desc: 'Передаём телефон по кругу',
-      disabled: false,
-    },
-    {
-      id: 'multiplayer',
-      icon: <Share2 size={22} color="var(--accent-2)"/>,
-      label: 'Мультиплеер',
-      desc: 'У каждого свой телефон',
-      disabled: false,
-    },
-  ]
 
   // Sanitize on-input. Пробелы между словами разрешены (sanitizeName схлопывает
   // повторные пробелы до одного и трим — это нужно, чтобы можно было ввести
@@ -2045,125 +2186,30 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, initialMode, setting
     setNames(n => n.filter((_, idx) => idx !== i))
   }
 
-  // Финальная очистка перед стартом + защита от пустых имён.
-  const handleStart = (rawNames, m) => {
+  // Финальная очистка перед стартом + защита от пустых имён + persist setup.
+  const handleStart = (rawNames) => {
     const finalNames = rawNames.map((n, i) => {
       const s = sanitizeName(n, 32)
       return s || `Игрок ${i + 1}`
     })
-    // Сохраним «моё» имя локально и на сервере, чтобы при следующих заходах
-    // в лобби/комнаты оно сразу подставлялось во все нужные поля.
     try {
       const myFinal = finalNames[0]
       if (myFinal) {
         localStorage.setItem('pu_my_name', myFinal)
-        // best-effort: серверу сообщим display_name (только если авторизованы)
         api.updateMe({ display_name: myFinal }).catch(() => {})
       }
+      localStorage.setItem(SINGLE_SETUP_KEY, JSON.stringify({ names: finalNames }))
     } catch {}
-    onStart(finalNames, m)
+    onStart(finalNames, 'one_phone')
   }
 
-  if (step === 0) {
-    return (
-      <div>
-        <p className="eyebrow"><Sparkles size={13}/> Настройка игры</p>
-        <h2 style={{marginBottom:6}}>Как играем?</h2>
-        <p className="lead" style={{marginBottom:4}}>{game.title}</p>
-
-        <div className="mode-option-grid">
-          {modeOptions.map(opt => (
-            <button
-              key={opt.id}
-              className={`mode-option-btn ${mode === opt.id ? 'is-selected' : ''}`}
-              onClick={() => !opt.disabled && setMode(opt.id)}
-              disabled={opt.disabled}
-            >
-              <div className="mode-option-icon">{opt.icon}</div>
-              <div className="mode-option-text">
-                <div className="mode-option-label">{opt.label}</div>
-                <div className="mode-option-desc">{opt.desc}</div>
-              </div>
-              {opt.badge && <span className="mode-soon-badge">{opt.badge}</span>}
-              {mode === opt.id && !opt.disabled && <Check size={16} color="var(--accent-2)" style={{flexShrink:0}}/>}
-            </button>
-          ))}
-        </div>
-
-        {/* Количество карточек в партии — зависит от игры (Truth: 25/50/100). */}
-        {setSettings && (
-          <CardCountSelector
-            game={game}
-            settings={settings}
-            setSettings={setSettings}
-            style={{ marginTop: 24 }}
-          />
-        )}
-
-        <button className="btn-primary mt-16" onClick={() => {
-          if (mode === 'multiplayer') {
-            // Мультиплеер — без отдельного экрана имени: имя берём из TG / localStorage.
-            const stored = (typeof localStorage !== 'undefined' && localStorage.getItem('pu_my_name')) || ''
-            const me = sanitizeName(myName || stored, 32) || 'Хост'
-            handleStart([me], 'multiplayer')
-          } else {
-            setStep(1)
-          }
-        }}>
-          {mode === 'multiplayer'
-            ? <><Play size={17}/> Создать комнату</>
-            : <><ChevronRight size={17}/> Далее</>}
-        </button>
-        <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
-          <ArrowLeft size={15}/> Назад
-        </button>
-      </div>
-    )
-  }
-
-  // Multiplayer: only enter your own name (legacy, не должен срабатывать)
-  if (mode === 'multiplayer') {
-    const myName = names[0]
-    return (
-      <div>
-        <p className="eyebrow"><Share2 size={13}/> Мультиплеер</p>
-        <h2 style={{marginBottom:6}}>Ваше имя</h2>
-        <p className="lead" style={{marginBottom:16}}>{game.title} · другие присоединятся по ссылке</p>
-
-        <div className="setup-player-list">
-          <div className="setup-player-row">
-            <div className="setup-player-emoji">{EMOJIS[0]}</div>
-            <input
-              className="setup-player-input"
-              value={myName}
-              onChange={e => { firstEditedRef.current = true; setNames([sanitizeName(e.target.value, 32)]) }}
-              placeholder="Ваше имя (хост)"
-              maxLength={20}
-              autoFocus
-            />
-          </div>
-        </div>
-
-        <div className="mp-setup-hint">
-          <Info size={14} style={{flexShrink:0, marginTop:1}}/>
-          <span>Создайте комнату и пригласите друзей по ссылке. У каждого будет свой телефон.</span>
-        </div>
-
-        <button className="btn-primary mt-16" onClick={() => handleStart([myName || 'Хост'], mode)}>
-          <Play size={17}/> Создать комнату
-        </button>
-        <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(0)}>
-          <ArrowLeft size={15}/> Назад
-        </button>
-      </div>
-    )
-  }
+  const vibe = VIBES.find(v => v.id === picker?.vibe) || VIBES[0]
 
   return (
     <div>
-      <p className="eyebrow"><Users size={13}/> Игроки</p>
+      <p className="eyebrow"><Users size={13}/> Локальная игра</p>
       <h2 style={{marginBottom:6}}>Кто играет?</h2>
-      <p className="lead" style={{marginBottom:4}}>{game.title}</p>
+      <p className="lead" style={{marginBottom:14}}>{game.title} · передаём телефон по кругу</p>
 
       <div className="setup-player-list">
         {names.map((name, i) => (
@@ -2198,12 +2244,37 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, initialMode, setting
         </button>
       )}
 
-      <button className="btn-primary mt-16" onClick={() => handleStart(names, mode)}>
+      {/* Вайб (открывает тот же модал что в bottom-nav) и кол-во карточек. */}
+      <div className="setup-axis-card">
+        <button className="setup-axis-row" onClick={() => setShowVibe(true)}>
+          <div className="setup-axis-key"><VibeIcon vibeId={vibe.id} size={16}/> Вайб</div>
+          <div className="setup-axis-val">{vibe.label} <ChevronRight size={14}/></div>
+        </button>
+      </div>
+
+      {setSettings && (
+        <CardCountSelector
+          game={game}
+          settings={settings}
+          setSettings={setSettings}
+          style={{ marginTop: 14 }}
+        />
+      )}
+
+      <button className="btn-primary mt-20" onClick={() => handleStart(names)}>
         <Play size={17}/> Начать игру
       </button>
-      <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={() => setStep(0)}>
+      <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
         <ArrowLeft size={15}/> Назад
       </button>
+
+      {showVibe && (
+        <VibePickerModal
+          currentVibe={picker?.vibe}
+          onPick={(v) => { setPicker(p => ({ ...p, vibe: v })); ev.vibeChange(v); setShowVibe(false); haptic?.('success') }}
+          onClose={() => setShowVibe(false)}
+        />
+      )}
     </div>
   )
 }
@@ -2219,7 +2290,7 @@ function lobbyCountLabel(game) {
   return 'Раундов'
 }
 
-function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe, haptic, isMultiplayer, isHost, roomId, onRoomPlayersUpdate, onGameStartedByHost, auth, onPlayerAvatarClick, myId }) {
+function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe, onChangeGame, haptic, isMultiplayer, isHost, roomId, onRoomPlayersUpdate, onGameStartedByHost, auth, onPlayerAvatarClick, myId }) {
   const [codeCopied, setCodeCopied] = useState(false)
 
   // Multiplayer polling in lobby — adaptive:
@@ -2244,6 +2315,10 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
         const et = res.headers.get('etag'); if (et) lastEtag = et
         const serverRoom = await res.json()
         if (serverRoom.players && onRoomPlayersUpdate) onRoomPlayersUpdate(serverRoom.players)
+        // Хост сменил игру в лобби — гости подтянут (только если ещё не играем).
+        if (serverRoom.gameId && serverRoom.gameId !== game.id && serverRoom.state === 'lobby' && onChangeGame) {
+          onChangeGame(serverRoom.gameId)
+        }
         if (serverRoom.state === 'playing' && !isHost && onGameStartedByHost) onGameStartedByHost()
       } catch {}
       schedule()
@@ -2258,7 +2333,7 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
     const onVis = () => { if (!document.hidden) { if (timer) clearTimeout(timer); poll() } }
     document.addEventListener('visibilitychange', onVis)
     return () => { cancelled = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVis) }
-  }, [isMultiplayer, roomId, isHost, onRoomPlayersUpdate, onGameStartedByHost, players?.length])
+  }, [isMultiplayer, roomId, isHost, onRoomPlayersUpdate, onGameStartedByHost, onChangeGame, game.id, players?.length])
 
   const handleStartMultiplayer = async () => {
     if (!roomId) return
@@ -2289,39 +2364,47 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
     await doInviteShare({ deeplink, text, gameId: game.id, kind: 'room', evName: 'lobby_invite' })
   }
 
+  // UI-state для модалок смены игры/вайба и инлайн-выбора кол-ва карточек.
+  const [showGamePicker, setShowGamePicker] = useState(false)
+  const [showVibe, setShowVibe] = useState(false)
+
+  // В мультиплеере «Начать игру» доступна только хосту И при наличии минимум
+  // одного гостя. Локальная игра — всегда доступна.
+  const canStart = !isMultiplayer || (isHost && players.length >= 2)
+
   return (
     <div>
-      {/* Warmup notification */}
-      {showWarmupHint && (
-        <div className="warmup-hint">
-          <Wind size={16} color="#ff9500" style={{flexShrink:0,marginTop:2}}/>
-          <div>
-            <strong>Разогрев — лёгкий старт</strong>
-            <span>Хочешь острее? Смени вайб прямо сейчас:</span>
-            <div style={{marginTop:8,display:'flex',gap:8,flexWrap:'wrap'}}>
-              {VIBES.filter(v => v.id !== 'warmup' && v.id !== 'adult').slice(0,3).map(v => (
-                <button key={v.id} className="tag" style={{cursor:'pointer'}}
-                  onClick={() => { onChangeVibe(v.id); onDismissHint() }}>
-                  <VibeIcon vibeId={v.id} size={12}/> {v.label}
-                </button>
-              ))}
-              <button className="btn-ghost" style={{minHeight:28,fontSize:12,padding:'0 10px'}} onClick={onDismissHint}>
-                <X size={12}/> Ок
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Шапка: «Онлайн-лобби» (mp) или «Локальная игра» */}
+      <p className="eyebrow">
+        {isMultiplayer
+          ? <><Share2 size={13}/> Онлайн-лобби</>
+          : <><Users size={13}/> Локальная игра</>}
+      </p>
+      <h2 style={{marginBottom: 6}}>
+        {isMultiplayer
+          ? (players.length < 2 ? 'Ожидание игроков' : 'Готовы начать!')
+          : 'Готовы начать!'}
+      </h2>
 
-      {/* Game header — крупная иконка + название, без дубля вайба/раундов */}
-      <div className="lobby-game-tag lobby-game-hero">
+      {/* Карточка игры с кнопкой смены справа */}
+      <div className="lobby-game-tag lobby-game-hero" style={{marginTop: 12}}>
         <div className="game-icon-token lobby-hero-icon">
           <GameIcon gameId={game.id} size={32} color="var(--accent-2)"/>
         </div>
-        <div className="lobby-hero-text">
+        <div className="lobby-hero-text" style={{flex: 1}}>
           <div className="lobby-hero-title">{game.title}</div>
           <div className="lobby-hero-sub">{game.short}</div>
         </div>
+        {(!isMultiplayer || isHost) && (
+          <button
+            type="button"
+            className="lobby-change-game-btn"
+            onClick={() => setShowGamePicker(true)}
+            aria-label="Сменить игру"
+          >
+            <RotateCcw size={14}/> Сменить
+          </button>
+        )}
       </div>
 
       {/* Multiplayer: room code + invite */}
@@ -2334,7 +2417,7 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
           </div>
           {isHost && (
             <button className="btn-secondary mt-10" style={{width:'100%'}} onClick={inviteLink}>
-              <Send size={15}/> Пригласить
+              <Send size={15}/> Пригласить друзей
             </button>
           )}
           {!isHost && (
@@ -2346,7 +2429,7 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
       )}
 
       {/* Players */}
-      <p className="eyebrow" style={{marginBottom:10}}><Users size={12}/> Игроки ({players.length})</p>
+      <p className="eyebrow" style={{marginBottom: 10}}><Users size={12}/> Игроки ({players.length})</p>
       <div className="player-list" role="list">
         {players.map(p => (
           <div key={p.id} className="player-row" role="listitem">
@@ -2362,28 +2445,96 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
         ))}
       </div>
 
-      {/* Settings summary */}
-      <div className="lobby-settings-card">
-        <div className="lobby-settings-row">
-          <span className="lobby-settings-key"><Dices size={12}/> {lobbyCountLabel(game)}</span>
-          <span className="lobby-settings-val">{settings.rounds}</span>
+      {/* Inline: вайб + количество карточек (только хост может менять в mp). */}
+      {(!isMultiplayer || isHost) ? (
+        <>
+          <div className="setup-axis-card" style={{marginTop: 14}}>
+            <button className="setup-axis-row" onClick={() => setShowVibe(true)}>
+              <div className="setup-axis-key">
+                <VibeIcon vibeId={currentVibe} size={16}/> Вайб
+              </div>
+              <div className="setup-axis-val">
+                {VIBES.find(v => v.id === currentVibe)?.label || 'Разогрев'} <ChevronRight size={14}/>
+              </div>
+            </button>
+          </div>
+          <CardCountSelector game={game} settings={settings} setSettings={setSettings} style={{marginTop: 10}}/>
+        </>
+      ) : (
+        <div className="lobby-settings-card">
+          <div className="lobby-settings-row">
+            <span className="lobby-settings-key"><Dices size={12}/> {lobbyCountLabel(game)}</span>
+            <span className="lobby-settings-val">{settings.rounds}</span>
+          </div>
+          <div className="lobby-settings-row">
+            <span className="lobby-settings-key"><VibeIcon vibeId={currentVibe} size={12}/> Вайб</span>
+            <span className="lobby-settings-val">{VIBES.find(v=>v.id===currentVibe)?.label || 'Разогрев'}</span>
+          </div>
         </div>
-        <div className="lobby-settings-row">
-          <span className="lobby-settings-key"><Play size={12}/> Режим</span>
-          <span className="lobby-settings-val">{isMultiplayer ? 'Мультиплеер' : 'Один телефон'}</span>
-        </div>
-        <div className="lobby-settings-row">
-          <span className="lobby-settings-key"><VibeIcon vibeId={currentVibe} size={12}/> Вайб</span>
-          <span className="lobby-settings-val">{VIBES.find(v=>v.id===currentVibe)?.label || 'Разогрев'}</span>
-        </div>
-      </div>
+      )}
 
-      {/* Start button: only host in multiplayer, everyone in local */}
+      {/* Start button */}
       {(!isMultiplayer || isHost) && (
-        <button className="btn-primary mt-20" onClick={isMultiplayer ? handleStartMultiplayer : onStart}>
-          <Play size={17}/> Начать игру
+        <button
+          className="btn-primary mt-20"
+          disabled={!canStart}
+          onClick={isMultiplayer ? handleStartMultiplayer : onStart}
+          title={!canStart ? 'Подключите хотя бы одного игрока' : undefined}
+        >
+          <Play size={17}/> {canStart ? 'Начать игру' : 'Ждём минимум 1 игрока…'}
         </button>
       )}
+
+      {/* Модалки */}
+      {showGamePicker && (
+        <GamePickerModal
+          currentId={game.id}
+          onPick={(id) => {
+            // Локально: меняем игру в App-level state. В mp: дополнительно посылаем gameId на сервер,
+            // чтобы все игроки увидели смену.
+            onChangeGame?.(id)
+            setShowGamePicker(false)
+          }}
+          onClose={() => setShowGamePicker(false)}
+        />
+      )}
+      {showVibe && (
+        <VibePickerModal
+          currentVibe={currentVibe}
+          onPick={(v) => { onChangeVibe(v); setShowVibe(false); haptic?.('success') }}
+          onClose={() => setShowVibe(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ─── GamePickerModal — компактная сетка простых игр, в один тап ────────── */
+function GamePickerModal({ currentId, onPick, onClose }) {
+  const items = GAMES.filter(g => g.simple)
+  return (
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Сменить игру">
+      <div className="welcome-modal vibe-picker-modal" onClick={e => e.stopPropagation()}>
+        <p className="eyebrow" style={{justifyContent: 'center'}}><Dices size={13}/> Сменить игру</p>
+        <h2 className="gradient-text" style={{textAlign: 'center', margin: '4px 0 14px'}}>Во что играем?</h2>
+        <div className="vibe-picker-grid">
+          {items.map(g => (
+            <button
+              key={g.id}
+              className={`vibe-picker-tile ${g.id === currentId ? 'is-active' : ''}`}
+              onClick={() => onPick(g.id)}
+            >
+              <span className="vibe-picker-icon"><GameIcon gameId={g.id} size={28} color="var(--accent-2)"/></span>
+              <span className="vibe-picker-label">{g.title}</span>
+              <span className="vibe-picker-hint">{g.short}</span>
+              {g.id === currentId && <Check size={14} className="vibe-picker-check"/>}
+            </button>
+          ))}
+        </div>
+        <button className="btn-ghost" style={{width: '100%', justifyContent: 'center', marginTop: 18}} onClick={onClose}>
+          <X size={15}/> Закрыть
+        </button>
+      </div>
     </div>
   )
 }
@@ -4049,7 +4200,33 @@ function TitlesBoard({ players, game }) {
   )
 }
 
-function ResultsScreen({ game, players, scores, onAgain, onHome }) {
+function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated }) {
+  // Гости в мультиплеере поллят комнату медленно (3 c, с visibility-gate):
+  // как только хост поменяет state на 'lobby' или 'playing' — навигатор
+  // сам отправит гостей туда же, чтобы все были в одном месте.
+  useEffect(() => {
+    if (!isMultiplayer || isHost || !roomId || !onHostNavigated) return
+    let cancelled = false, timer = null, lastEtag = null
+    const poll = async () => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
+      try {
+        const headers = lastEtag ? { 'If-None-Match': lastEtag } : undefined
+        const res = await fetch(`/api/room/${roomId}`, { headers })
+        if (cancelled) return
+        if (res.status === 304) { schedule(); return }
+        if (!res.ok) { schedule(); return }
+        const et = res.headers.get('etag'); if (et) lastEtag = et
+        const r = await res.json()
+        if (r.state === 'lobby' || r.state === 'playing') { onHostNavigated(r.state); return }
+      } catch {}
+      schedule()
+    }
+    const schedule = () => { if (!cancelled) timer = setTimeout(poll, 3000) }
+    poll()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [isMultiplayer, isHost, roomId, onHostNavigated])
+
   const [shared, setShared] = useState(false)
   const hasScores = players.some(p => (scores[p.id] || 0) > 0)
 
@@ -4124,14 +4301,31 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         </button>
       </div>
 
-      {/* Action buttons */}
+      {/* Action buttons.
+          В мультиплеере решает только хост — у гостей кнопки disabled
+          (и подписаны, что ждём лидера). Лидер выбирает: вернуться в то же
+          лобби (с тем же roomId, чтобы продолжать с теми же людьми) или
+          начать заново эту игру. */}
       <div className="results-actions">
-        <button className="btn-primary no-pulse" onClick={onAgain}>
-          <RotateCcw size={16}/> Новая игра
+        <button
+          className="btn-primary no-pulse"
+          disabled={isMultiplayer && !isHost}
+          onClick={onAgain}
+          title={isMultiplayer && !isHost ? 'Решение за хостом' : undefined}>
+          <RotateCcw size={16}/> Начать новую игру
         </button>
-        <button className="btn-secondary" onClick={onHome}>
-          <Dices size={16}/> Выбрать другую игру
+        <button
+          className="btn-secondary"
+          disabled={isMultiplayer && !isHost}
+          onClick={onBackToLobby || onHome}
+          title={isMultiplayer && !isHost ? 'Решение за хостом' : undefined}>
+          <Users size={16}/> Вернуться в лобби
         </button>
+        {isMultiplayer && !isHost && (
+          <div className="muted" style={{textAlign: 'center', marginTop: 6, fontSize: 12}}>
+            <Clock size={11} style={{verticalAlign: '-1px'}}/> Ждём решение хоста…
+          </div>
+        )}
       </div>
     </div>
   )

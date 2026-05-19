@@ -2780,3 +2780,120 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   font-size: 20px;
   box-shadow: none;
 }
+
+/* ════════════════════════════════════════════════
+   START FLOW · v2 (mode cards, vibe in nav, lobby change-game)
+════════════════════════════════════════════════ */
+.mode-card-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 10px; }
+@media (min-width: 520px) { .mode-card-grid { grid-template-columns: 1fr 1fr; } }
+.mode-card {
+  position: relative; text-align: left; padding: 18px 18px 16px;
+  border-radius: var(--r-lg); background: var(--s2);
+  border: 1px solid var(--border); color: var(--text);
+  cursor: pointer; display: flex; flex-direction: column; gap: 4px;
+  transition: transform var(--fast) var(--spring), box-shadow var(--fast), border-color var(--fast);
+  overflow: hidden;
+}
+.mode-card::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(120% 80% at 0% 0%, rgba(167,139,250,0.18), transparent 55%);
+  opacity: .8;
+}
+.mode-card-local::before {
+  background: radial-gradient(120% 80% at 0% 0%, rgba(244,114,182,0.22), transparent 55%);
+}
+.mode-card-mp::before {
+  background: radial-gradient(120% 80% at 100% 0%, rgba(124,58,237,0.28), transparent 60%);
+}
+.mode-card:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 12px 32px rgba(124,58,237,0.18); }
+.mode-card:active { transform: scale(0.985); }
+.mode-card-icon {
+  width: 44px; height: 44px; border-radius: 12px;
+  display: grid; place-items: center; margin-bottom: 8px;
+  background: linear-gradient(135deg, rgba(167,139,250,0.18), rgba(124,58,237,0.18));
+  color: var(--accent-2);
+}
+.mode-card-title { font-weight: 700; font-size: 16px; }
+.mode-card-desc  { font-size: 13px; color: var(--muted); }
+.mode-card-arrow {
+  position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); opacity: .55;
+}
+.mode-card:hover .mode-card-arrow { color: var(--accent-2); opacity: 1; }
+
+/* setup axis row (Vibe link in single-setup / lobby) */
+.setup-axis-card { background: var(--s2); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
+.setup-axis-row {
+  width: 100%; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between;
+  background: none; border: none; color: var(--text); cursor: pointer; font: inherit; gap: 10px;
+}
+.setup-axis-row:hover { background: var(--s3); }
+.setup-axis-key { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.setup-axis-val { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+
+/* Lobby: change-game pill in header */
+.lobby-change-game-btn {
+  flex-shrink: 0; padding: 6px 10px; border-radius: 999px;
+  background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.35);
+  color: var(--accent-2); font-size: 12px; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+  transition: background var(--fast), transform var(--fast);
+}
+.lobby-change-game-btn:hover { background: rgba(167,139,250,0.25); }
+.lobby-change-game-btn:active { transform: scale(0.96); }
+
+/* Vibe button in bottom-nav — центральный «акцент» */
+.bnav-item.is-vibe {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 4px 10px 6px; background: none; border: none; cursor: pointer; color: var(--text);
+  font: inherit; transform: translateY(-10px);
+}
+.bnav-vibe-glow {
+  position: absolute; top: -2px; left: 50%; transform: translateX(-50%);
+  width: 56px; height: 56px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(167,139,250,0.55) 0%, transparent 65%);
+  filter: blur(4px); pointer-events: none; z-index: 0;
+  animation: pulse-glow 3s ease-in-out infinite;
+}
+.bnav-vibe-icon {
+  position: relative; z-index: 1;
+  width: 46px; height: 46px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent) 0%, #7c3aed 100%);
+  color: #fff; box-shadow: 0 8px 22px rgba(124,58,237,0.55);
+  transition: transform var(--fast) var(--spring);
+}
+.bnav-item.is-vibe:hover .bnav-vibe-icon { transform: scale(1.06); }
+.bnav-item.is-vibe:active .bnav-vibe-icon { transform: scale(0.94); }
+.bnav-vibe-label { font-size: 10px; font-weight: 700; color: var(--accent-2); letter-spacing: 0.02em; position: relative; z-index: 1; }
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.7; transform: translateX(-50%) scale(1); }
+  50%      { opacity: 1;   transform: translateX(-50%) scale(1.08); }
+}
+
+/* Vibe / Game picker modal grid */
+.vibe-picker-modal { padding: 20px 18px 18px; }
+.vibe-picker-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+@media (min-width: 480px) { .vibe-picker-grid { grid-template-columns: 1fr 1fr 1fr; } }
+.vibe-picker-tile {
+  position: relative; background: var(--s3); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 14px 12px 12px; text-align: center;
+  color: var(--text); cursor: pointer; display: flex; flex-direction: column; gap: 4px; align-items: center;
+  transition: transform var(--fast) var(--spring), border-color var(--fast), background var(--fast);
+}
+.vibe-picker-tile:hover { border-color: var(--accent); transform: translateY(-2px); }
+.vibe-picker-tile.is-active {
+  background: linear-gradient(135deg, rgba(167,139,250,0.22), rgba(124,58,237,0.22));
+  border-color: var(--accent);
+}
+.vibe-picker-tile[data-adult="true"] { border-color: rgba(244,114,182,0.4); }
+.vibe-picker-tile[data-adult="true"].is-active {
+  background: linear-gradient(135deg, rgba(244,114,182,0.18), rgba(190,24,93,0.22));
+  border-color: #f472b6;
+}
+.vibe-picker-icon { width: 44px; height: 44px; display: grid; place-items: center; }
+.vibe-picker-label { font-weight: 700; font-size: 14px; }
+.vibe-picker-hint { font-size: 11px; color: var(--muted); line-height: 1.3; }
+.vibe-picker-check { position: absolute; top: 8px; right: 8px; color: var(--accent-2); }

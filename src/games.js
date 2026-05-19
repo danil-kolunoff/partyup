@@ -271,7 +271,7 @@ const ADULT_HOT_SEAT = [
 
 export const GAMES = [
   {
-    id: 'truth',
+    simple: true, id: 'truth',
     title: 'Правда или действие',
     emoji: '🎯',
     short: 'Узнаешь о друзьях такое, что не забудешь',
@@ -341,7 +341,7 @@ export const GAMES = [
     roundType: 'truth_dare',
   },
   {
-    id: 'never',
+    simple: true, id: 'never',
     title: 'Я никогда не…',
     emoji: '🙅',
     short: 'Чья жизнь богаче? Сейчас разберёмся',
@@ -411,7 +411,7 @@ export const GAMES = [
     roundType: 'never_have_i',
   },
   {
-    id: 'whoofus',
+    simple: true, id: 'whoofus',
     title: 'Кто из нас',
     emoji: '👥',
     short: 'Кто из вас самый..? Узнаете прямо сейчас',
@@ -471,7 +471,7 @@ export const GAMES = [
     roundType: 'who_of_us',
   },
   {
-    id: 'five',
+    simple: true, id: 'five',
     title: '5 секунд',
     emoji: '⏱️',
     short: '5 секунд — и мозг отключается. Проверено',
@@ -853,7 +853,7 @@ export const GAMES = [
     roundType: 'prompt',
   },
   {
-    id: 'most',
+    simple: true, id: 'most',
     title: 'Кто скорее всего…',
     emoji: '📊',
     short: 'Голосуйте — кто из вас скорее всего это сделает?',
@@ -1164,7 +1164,7 @@ export const GAMES = [
     roundType: 'taboo',
   },
   {
-    id: 'associations',
+    simple: true, id: 'associations',
     title: 'Ассоциации',
     emoji: '🧠',
     short: 'Одно слово — и всё становится ясно о человеке',
