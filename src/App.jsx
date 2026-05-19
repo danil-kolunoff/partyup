@@ -275,6 +275,7 @@ export default function App() {
   const [showVibePicker, setShowVibePicker] = useState(false)
   const [focusJoinInput, setFocusJoinInput] = useState(false)
   const [buyVibe, setBuyVibe] = useState(null) // объект VIBE для покупки
+  const [purchaseSuccessVibe, setPurchaseSuccessVibe] = useState(null) // успешно купленный — для "спасибо"-модалки
   const [ownedPacks, setOwnedPacks] = useState([])
   // Краткая карточка чужого игрока (когда у него нет TG username и это не «я»).
   const [viewedPlayer, setViewedPlayer] = useState(null)
@@ -513,6 +514,15 @@ export default function App() {
   }, [auth, myPlayerId, navigate])
 
   const createLobby = useCallback(async (names, mode, gameOverride) => {
+    // Защита: запускающий не может стартовать игру с премиум-вайбом, который
+    // он не купил. UI этого не должен допускать (locked-чипы открывают
+    // покупку), но это безопасный safety-net на случай, если picker.vibe
+    // был выставлен раньше (например, гостем после захода в чужую комнату).
+    const v = VIBES.find(x => x.id === picker.vibe)
+    if (v?.premium && v.packId && !ownedPacks.includes(v.packId)) {
+      setBuyVibe(v)
+      return
+    }
     if (picker.vibe === 'warmup') setShowWarmupHint(true)
     else setShowWarmupHint(false)
 
@@ -614,7 +624,7 @@ export default function App() {
     haptic('impact')
     // PlayerSetup — последний экран перед игрой. LOBBY с готовностями убран.
     navigate(SCREENS.ROUND)
-  }, [haptic, navigate, picker, selectedGame, settings, myPlayerId])
+  }, [haptic, navigate, picker, selectedGame, settings, myPlayerId, ownedPacks])
 
   const startRound = useCallback(() => {
     setShowWarmupHint(false); setReaction(null)
@@ -843,7 +853,9 @@ export default function App() {
           <HomeScreen picker={picker} setPicker={setPicker}
             onPicker={() => navigate(SCREENS.PICKER)} onGame={openGame}
             onAllGames={() => navigate(SCREENS.GAMES)}
-            onBurst={burstFromEvent} />}
+            onBurst={burstFromEvent}
+            ownedPacks={ownedPacks}
+            onBuyVibe={(v) => setBuyVibe(v)} />}
         {screen === SCREENS.GAMES &&
           <GamesScreen
             onGame={openGame}
@@ -886,6 +898,9 @@ export default function App() {
             setPicker={setPicker}
             haptic={haptic}
             auth={auth}
+            ownedPacks={ownedPacks}
+            onBuyVibe={(v) => setBuyVibe(v)}
+            onVibeBurst={burstFromVibeBtn}
             onAvatarClick={() => navigate(SCREENS.PROFILE)}
             onStart={(names, mode) => {
               setPendingMode(null)
@@ -897,6 +912,9 @@ export default function App() {
           <LobbyScreen game={selectedGame} players={players} room={room}
             myId={myPlayerId}
             settings={settings} setSettings={setSettings}
+            ownedPacks={ownedPacks}
+            onBuyVibe={(v) => setBuyVibe(v)}
+            onVibeBurst={burstFromVibeBtn}
             showWarmupHint={showWarmupHint} onDismissHint={() => setShowWarmupHint(false)}
             onStart={startRound} everyoneReady={everyoneReady}
             onToggleReady={togglePlayerReady} onAllReady={setAllReady}
@@ -1051,15 +1069,28 @@ export default function App() {
           vibe={buyVibe}
           onClose={() => setBuyVibe(null)}
           onPurchased={async () => {
-            // Опрашиваем /api/me — webhook успеет проставить user_packs.
+            // Webhook успеет проставить user_packs — опрашиваем /api/me.
             const packs = await refreshOwnedPacks()
-            if (packs?.includes(buyVibe.packId)) {
-              setPicker(p => ({ ...p, vibe: buyVibe.id }))
-              ev.vibeChange(buyVibe.id)
-              haptic('success')
-              burstFromVibeBtn()
-            }
+            const vibeJustBought = buyVibe
             setBuyVibe(null)
+            if (packs?.includes(vibeJustBought.packId)) {
+              // Активируем купленный вайб и показываем «спасибо»-модалку.
+              setPicker(p => ({ ...p, vibe: vibeJustBought.id }))
+              ev.vibeChange(vibeJustBought.id)
+              haptic('success')
+              setPurchaseSuccessVibe(vibeJustBought)
+            }
+          }}
+        />
+      )}
+      {purchaseSuccessVibe && (
+        <PurchaseSuccessModal
+          vibe={purchaseSuccessVibe}
+          onClose={() => {
+            // Burst эмодзи играем при закрытии «спасибо»-модалки —
+            // визуально подтверждаем активацию.
+            setPurchaseSuccessVibe(null)
+            burstFromVibeBtn()
           }}
         />
       )}
@@ -1475,6 +1506,34 @@ function PackPurchaseModal({ vibe, onPurchased, onClose }) {
   )
 }
 
+/* ─── PurchaseSuccessModal — спасибо за покупку ──────────────────────────── */
+function PurchaseSuccessModal({ vibe, onClose }) {
+  return (
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="welcome-modal purchase-success-modal" onClick={e => e.stopPropagation()}>
+        <div className="purchase-success-icon">
+          <div className="purchase-success-ring"/>
+          <span>{vibe.icon}</span>
+        </div>
+        <h2 className="gradient-text" style={{margin: '0 0 4px'}}>Спасибо!</h2>
+        <p className="lead" style={{margin: '0 0 6px'}}>
+          Пак <b>«{vibe.label}»</b> активирован.
+        </p>
+        <p className="muted" style={{fontSize: 13, lineHeight: 1.5, marginBottom: 14}}>
+          Карточки доступны во всех играх. Когда ты — хост, друзья
+          в твоей комнате играют с этим набором бесплатно.
+        </p>
+        <p className="lead" style={{margin: '0 0 16px', color: 'var(--accent-2)', fontWeight: 600}}>
+          Веселых игр! 🎉
+        </p>
+        <button className="btn-primary" style={{width: '100%'}} onClick={onClose}>
+          Поехали
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* ─── ViewedPlayerModal ──────────────────────────────────────────────────── */
 // Карточка чужого игрока без TG-username: имя, аватарка, эмодзи. Лёгкая alt-версия
 // «профиля по тапу на аватарку», когда нет смысла открывать чат.
@@ -1718,7 +1777,7 @@ function GameSections({ onGame }) {
 }
 
 /* ─── HomeScreen ──────────────────────────────────────────────────────────── */
-function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }) {
+function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst, ownedPacks = [], onBuyVibe }) {
   const [vibeToast, setVibeToast] = useState(false)
   const [showAdultModal, setShowAdultModal] = useState(null)
   const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
@@ -1737,13 +1796,19 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
 
   const handleVibeChange = (vibeId) => {
     if (vibeId === picker.vibe) return
+    const v = VIBES.find(x => x.id === vibeId)
+    // Платный вайб без покупки — открываем модалку покупки, НЕ переключаем.
+    if (v?.premium && v.packId && !ownedPacks.includes(v.packId)) {
+      onBuyVibe?.(v)
+      return
+    }
     if (vibeId === 'adult' || vibeId === 'ultra_adult') {
       setShowAdultModal(vibeId); return
     }
     setPicker(p => ({ ...p, vibe: vibeId }))
     ev.vibeChange(vibeId)
     setVibeToast(true)
-    onBurst?.() // burst всегда из центра bnav-кнопки (см. App.burstFromVibeBtn)
+    onBurst?.()
   }
 
   const confirmAdult = () => {
@@ -1774,16 +1839,20 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
           </p>
         </div>
         <div ref={vibeScrollRef} className="vibe-scroll" role="listbox" aria-label="Выбор вайба">
-          {VIBES.map(v => (
-            <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
-              className={`vibe-chip ${v.id === picker.vibe ? 'is-active' : ''}`}
-              data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
-              onClick={(e) => handleVibeChange(v.id, e)}>
-              <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={20}/></span>
-              <span className="vibe-chip-label">{v.label}</span>
-              <span className="vibe-chip-hint">{v.hint}</span>
-            </button>
-          ))}
+          {VIBES.map(v => {
+            const locked = v.premium && v.packId && !ownedPacks.includes(v.packId)
+            return (
+              <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
+                className={`vibe-chip ${v.id === picker.vibe ? 'is-active' : ''} ${locked ? 'is-locked' : ''}`}
+                data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+                onClick={(e) => handleVibeChange(v.id, e)}>
+                <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={20}/></span>
+                <span className="vibe-chip-label">{v.label}</span>
+                <span className="vibe-chip-hint">{v.hint}</span>
+                {locked && <span className="vibe-chip-lock"><Lock size={10}/> {v.priceStars}★</span>}
+              </button>
+            )
+          })}
         </div>
         {vibeToast && (
           <div className="vibe-affects" key={picker.vibe}>
@@ -2343,7 +2412,7 @@ function GameDetailScreen({ game, onPickMode }) {
 // + выбор вайба и кол-ва карточек. Имена/количество и вайб запоминаются в
 // localStorage и подставляются во все последующие single-сессии.
 const SINGLE_SETUP_KEY = 'pu_single_setup'
-function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSettings, auth, onAvatarClick, picker, setPicker, haptic }) {
+function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSettings, auth, onAvatarClick, picker, setPicker, haptic, ownedPacks = [], onBuyVibe, onVibeBurst }) {
   const PLACEHOLDER_ME = 'Вы'
   const cleanReal = (s) => {
     const x = sanitizeName(s || '', 32)
@@ -2478,7 +2547,9 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSetting
       {showVibe && (
         <VibePickerModal
           currentVibe={picker?.vibe}
-          onPick={(v) => { setPicker(p => ({ ...p, vibe: v })); ev.vibeChange(v); setShowVibe(false); haptic?.('success') }}
+          ownedPacks={ownedPacks}
+          onBuy={(v) => { setShowVibe(false); onBuyVibe?.(v) }}
+          onPick={(v) => { setPicker(p => ({ ...p, vibe: v })); ev.vibeChange(v); setShowVibe(false); haptic?.('success'); onVibeBurst?.() }}
           onClose={() => setShowVibe(false)}
         />
       )}
@@ -2497,7 +2568,7 @@ function lobbyCountLabel(game) {
   return 'Раундов'
 }
 
-function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe, onChangeGame, haptic, isMultiplayer, isHost, roomId, onRoomPlayersUpdate, onGameStartedByHost, auth, onPlayerAvatarClick, myId }) {
+function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHint, onDismissHint, onStart, everyoneReady, onToggleReady, onAllReady, currentVibe, onChangeVibe, onChangeGame, haptic, isMultiplayer, isHost, roomId, onRoomPlayersUpdate, onGameStartedByHost, auth, onPlayerAvatarClick, myId, ownedPacks = [], onBuyVibe, onVibeBurst }) {
   const [codeCopied, setCodeCopied] = useState(false)
 
   // Multiplayer polling in lobby — adaptive:
@@ -2708,7 +2779,9 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
       {showVibe && (
         <VibePickerModal
           currentVibe={currentVibe}
-          onPick={(v) => { onChangeVibe(v); setShowVibe(false); haptic?.('success') }}
+          ownedPacks={ownedPacks}
+          onBuy={(v) => { setShowVibe(false); onBuyVibe?.(v) }}
+          onPick={(v) => { onChangeVibe(v); setShowVibe(false); haptic?.('success'); onVibeBurst?.() }}
           onClose={() => setShowVibe(false)}
         />
       )}

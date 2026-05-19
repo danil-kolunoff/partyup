@@ -3038,12 +3038,25 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 
 .share-card-v2 { padding: 18px 18px 16px; }
 
-/* Vibe / Game picker modal grid */
-.vibe-picker-modal { padding: 20px 18px 18px; }
-.vibe-picker-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+/* Vibe / Game picker modal — компактный bottom-sheet, не на весь экран */
+.vibe-picker-modal {
+  padding: 18px 16px 16px;
+  max-width: 460px;
+  width: 100%;
+  border-radius: 22px 22px var(--r-2xl) var(--r-2xl);
 }
-@media (min-width: 480px) { .vibe-picker-grid { grid-template-columns: 1fr 1fr 1fr; } }
+.vibe-picker-modal h2 { font-size: 19px; }
+.vibe-picker-modal .lead { font-size: 13px; margin-bottom: 14px; }
+.vibe-picker-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+}
+@media (min-width: 520px) { .vibe-picker-grid { grid-template-columns: repeat(3, 1fr); } }
+.vibe-picker-tile {
+  padding: 12px 8px 10px;
+}
+.vibe-picker-icon { width: 36px; height: 36px; }
+.vibe-picker-label { font-size: 13px; }
+.vibe-picker-hint { font-size: 10px; line-height: 1.25; }
 .vibe-picker-tile {
   position: relative; background: var(--s3); border: 1px solid var(--border);
   border-radius: var(--r-md); padding: 14px 12px 12px; text-align: center;
@@ -3092,4 +3105,32 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35);
   color: #fca5a5; padding: 8px 12px; border-radius: 8px; font-size: 13px;
   margin-top: 12px; display: inline-flex; align-items: center; gap: 6px;
+}
+
+/* Lock-бейдж на vibe-chip (главная) */
+.vibe-chip.is-locked { border-color: rgba(234,88,12,0.40); }
+.vibe-chip-lock {
+  position: absolute; top: 4px; right: 4px;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 6px; border-radius: 999px;
+  background: linear-gradient(135deg, #f59e0b, #ea580c);
+  color: #fff; font-size: 9px; font-weight: 700;
+  box-shadow: 0 2px 6px rgba(234,88,12,0.45);
+  line-height: 1;
+}
+
+/* Спасибо за покупку — большая иконка с ring-glow */
+.purchase-success-modal { text-align: center; padding: 28px 22px 22px; max-width: 380px; }
+.purchase-success-icon {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 96px; height: 96px; margin: 4px auto 14px; font-size: 56px;
+}
+.purchase-success-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: radial-gradient(circle, rgba(167,139,250,0.45) 0%, transparent 70%);
+  animation: success-ring-pulse 2.4s ease-in-out infinite;
+}
+@keyframes success-ring-pulse {
+  0%, 100% { opacity: 0.65; transform: scale(0.92); }
+  50%      { opacity: 1;    transform: scale(1.10); }
 }
