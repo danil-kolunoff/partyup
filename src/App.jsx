@@ -1005,6 +1005,14 @@ export default function App() {
             ev.vibeChange(v)
             setShowVibePicker(false)
             haptic('success')
+            // Разлёт эмодзи из центра bnav-кнопки вайба — единственное место,
+            // где играем burst. Чипы на главной/в сетапе тихо меняют вайб.
+            const el = document.querySelector('.bnav-item.is-vibe')
+            if (el?.getBoundingClientRect) {
+              const r = el.getBoundingClientRect()
+              hapticBurst('normal')
+              setVibeBurstEvent(b => ({ id: b.id + 1, x: r.left + r.width / 2, y: r.top + r.height / 2 }))
+            }
           }}
           onClose={() => setShowVibePicker(false)}
         />
@@ -1538,15 +1546,16 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
     wrap.scrollTo({ left: wrap.scrollLeft + offset, behavior: 'smooth' })
   }, [picker.vibe])
 
-  const handleVibeChange = (vibeId, evt) => {
-    if (vibeId === picker.vibe) { onBurst?.(evt); return }
+  const handleVibeChange = (vibeId) => {
+    if (vibeId === picker.vibe) return
     if (vibeId === 'adult' || vibeId === 'ultra_adult') {
-      setPendingAdultEvt(evt); setShowAdultModal(vibeId); return
+      setShowAdultModal(vibeId); return
     }
     setPicker(p => ({ ...p, vibe: vibeId }))
     ev.vibeChange(vibeId)
-    onBurst?.(evt)
     setVibeToast(true)
+    // Burst-эффект играется ТОЛЬКО из центральной кнопки в bottom-nav,
+    // здесь — тихая смена вайба.
   }
 
   const confirmAdult = () => {
@@ -1554,7 +1563,6 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst }
     setPicker(p => ({ ...p, vibe: v }))
     ev.vibeChange(v)
     setShowAdultModal(null)
-    onBurst?.(pendingAdultEvt)
     setVibeToast(true)
   }
 
@@ -1673,17 +1681,9 @@ function GamesScreen({ onGame, onEnterLobby }) {
   const simple = GAMES.filter(g => g.simple)
   return (
     <div>
-      <div style={{display: 'flex', gap: 10, marginBottom: 14, alignItems: 'flex-start'}}>
-        <div style={{flex: 1, minWidth: 0}}>
-          <p className="eyebrow"><Dices size={13}/> Все игры</p>
-          <h2 style={{marginBottom: 4}}>Выбирай и играй</h2>
-          <p className="lead" style={{margin: 0}}>На одном телефоне или вместе по сети — за пару тапов.</p>
-        </div>
-        <button className="btn-secondary no-pulse" style={{flexShrink: 0, width: 'auto', padding: '8px 14px', minHeight: 36, fontSize: 13}}
-          onClick={onEnterLobby}>
-          <UserPlus size={14}/> Войти в лобби
-        </button>
-      </div>
+      <p className="eyebrow"><Dices size={13}/> Все игры</p>
+      <h2 style={{marginBottom: 4}}>Выбирай и играй</h2>
+      <p className="lead" style={{marginBottom: 14}}>На одном телефоне или вместе по сети — за пару тапов.</p>
 
       <div className="game-list">
         {simple.map((g, i) => (
@@ -1691,6 +1691,16 @@ function GamesScreen({ onGame, onEnterLobby }) {
             style={{animationDelay: `${i * 0.04}s`}}/>
         ))}
       </div>
+
+      {/* Войти в лобби — под списком игр. Не основное действие на этом экране,
+          поэтому secondary-стиль и нижняя позиция, без burst-эффекта. */}
+      <button
+        className="btn-secondary no-pulse"
+        style={{marginTop: 16, width: '100%'}}
+        onClick={onEnterLobby}
+      >
+        <UserPlus size={15}/> Войти в лобби
+      </button>
     </div>
   )
 }
