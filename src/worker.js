@@ -309,6 +309,75 @@ async function ensureMenuButton(env, chatId) {
 }
 
 async function handleUpdate(update, env) {
+  // ── Telegram Stars: pre_checkout_query — ОБЯЗАТЕЛЬНО ответить в течение 10 c.
+  // Иначе Telegram автоматически отклоняет платёж. Здесь проверяем что покупка
+  // валидна (payload вида pack:<id>:<userId>, такой purchase у нас pending) и
+  // отвечаем ok. На этой стадии деньги ещё не списаны.
+  if (update.pre_checkout_query) {
+    const pcq = update.pre_checkout_query;
+    let ok = true, errMsg = '';
+    try {
+      const payload = String(pcq.invoice_payload || '');
+      const m = payload.match(/^pack:([^:]+):(\d+)$/);
+      if (!m) { ok = false; errMsg = 'Невалидный payload'; }
+      else {
+        const [, packId, userIdStr] = m;
+        const userId = Number(userIdStr);
+        const pack = await env.DB.prepare('SELECT * FROM packs WHERE id = ?').bind(packId).first();
+        if (!pack) { ok = false; errMsg = 'Пак не найден'; }
+        else if (!pack.is_premium || !pack.price_stars) { ok = false; errMsg = 'Пак не платный'; }
+        else if (pcq.from?.id !== userId) { ok = false; errMsg = 'Покупатель не совпадает'; }
+      }
+    } catch (e) { ok = false; errMsg = 'Ошибка валидации'; }
+    await tg(env, 'answerPreCheckoutQuery', {
+      pre_checkout_query_id: pcq.id,
+      ok,
+      ...(ok ? {} : { error_message: errMsg || 'Не удалось оформить покупку' }),
+    });
+    return;
+  }
+
+  // ── successful_payment — фактическое списание Stars произошло. Помечаем
+  // purchase paid + добавляем юзеру пак в user_packs. Идемпотентно: проверяем
+  // что charge_id ещё не обрабатывали.
+  if (update.message?.successful_payment) {
+    const sp = update.message.successful_payment;
+    const fromId = update.message.from?.id;
+    const payload = String(sp.invoice_payload || '');
+    const m = payload.match(/^pack:([^:]+):(\d+)$/);
+    if (m && fromId) {
+      const [, packId, userIdStr] = m;
+      const userId = Number(userIdStr);
+      if (userId === fromId) {
+        try {
+          const ts = now();
+          // 1) пометить последний pending purchase этого юзера для этого пака
+          await env.DB.prepare(
+            `UPDATE purchases SET status='paid', tg_payment_charge_id=?, paid_at=?
+             WHERE user_id=? AND item_type='pack' AND item_id=? AND status='pending'`
+          ).bind(sp.telegram_payment_charge_id || null, ts, userId, packId).run();
+          // 2) выдать пак (идемпотентно через PRIMARY KEY (user_id, pack_id))
+          await env.DB.prepare(
+            `INSERT INTO user_packs (user_id, pack_id, source, acquired_at)
+             VALUES (?, ?, 'stars', ?)
+             ON CONFLICT(user_id, pack_id) DO NOTHING`
+          ).bind(userId, packId, ts).run();
+          // 3) подтверждение в чат
+          await tg(env, 'sendMessage', {
+            chat_id: fromId,
+            text: `✨ Пак активирован! Открой PartyUp — теперь карточки доступны во всех играх.`,
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '🎮 Открыть PartyUp', web_app: { url: env.WEBAPP_URL || WEBAPP_URL_DEFAULT } },
+              ]],
+            },
+          });
+        } catch (e) { console.error('successful_payment handler', e); }
+      }
+    }
+    return;
+  }
+
   // inline-режим: @PartyUp_Gamebot <команда> → расширенный набор результатов.
   // См. src/worker-inline.js — поддерживает игры, карточки, вайбы, room <ID>, помощь.
   if (update.inline_query) {
@@ -1082,14 +1151,16 @@ async function handleMe(request, env) {
   if (userId) {
     const user = await env.DB.prepare('SELECT * FROM users WHERE tg_id = ?').bind(userId).first();
     const stats = await getUserStats(env, userId);
-    return corsJson({ mode: 'telegram', user, stats });
+    const packsRs = await env.DB.prepare('SELECT pack_id FROM user_packs WHERE user_id = ?').bind(userId).all();
+    const ownedPacks = (packsRs.results || []).map(r => r.pack_id);
+    return corsJson({ mode: 'telegram', user, stats, ownedPacks });
   }
   if (anonId) {
     const user = await env.DB.prepare('SELECT * FROM anon_users WHERE anon_id = ?').bind(anonId).first();
     const stats = await getAnonStats(env, anonId);
-    return corsJson({ mode: 'anon', user, stats });
+    return corsJson({ mode: 'anon', user, stats, ownedPacks: [] });
   }
-  return corsJson({ mode: 'guest', user: null, stats: null });
+  return corsJson({ mode: 'guest', user: null, stats: null, ownedPacks: [] });
 }
 
 async function handleTrack(request, env) {
@@ -3060,12 +3131,35 @@ async function handleTgSetup(request, env) {
   return corsJson({ ok: true, webhook: wh, commands: cmds, menu, info });
 }
 
-/* ─── Payments (Telegram Stars) — заготовка ──────────────────────────────── */
+/* ─── Payments (Telegram Stars) ───────────────────────────────────────────── */
+// Каталог премиум-паков. Источник истины — этот объект; в D1 он зеркалируется
+// лениво (при первой покупке). Так не нужно держать миграцию синхронной с
+// фронтом. Цены и тайтлы должны совпадать с VIBES в games.js (premium-блоком).
+const PREMIUM_PACKS = {
+  pack_cringe:       { title: 'Кринж 🤡',       description: 'Неловкие моменты, признания, сторис из жизни.', price_stars: 99,  vibe: 'cringe' },
+  pack_teambuilding: { title: 'Тимбилдинг 💼',  description: 'Карточки для коллег и команд. Без офисного занудства.', price_stars: 99,  vibe: 'teambuilding' },
+  pack_ultra_adult:  { title: '24+ 💋',         description: 'Самые откровенные карточки. Без цензуры.', price_stars: 149, vibe: 'ultra_adult' },
+};
+
+async function ensurePackExists(env, packId) {
+  const def = PREMIUM_PACKS[packId];
+  if (!def) return null;
+  const existing = await env.DB.prepare('SELECT id FROM packs WHERE id = ?').bind(packId).first();
+  if (existing) return existing;
+  await env.DB.prepare(
+    `INSERT INTO packs (id, title, description, game_id, vibe, is_premium, price_stars, cards_count, created_at)
+     VALUES (?, ?, ?, NULL, ?, 1, ?, 0, ?)`
+  ).bind(packId, def.title, def.description, def.vibe, def.price_stars, now()).run();
+  return { id: packId };
+}
+
 async function handleCreateInvoice(request, env) {
   const body = await request.json().catch(() => ({}));
   const { userId } = await resolveCaller(request, env);
   if (!userId) return corsJson({ error: 'auth_required' }, 401);
   if (!body.packId) return corsJson({ error: 'missing_pack' }, 400);
+  // Ленивая инициализация: если пак известен в реестре, но ещё не в D1 — заводим.
+  await ensurePackExists(env, body.packId);
   const pack = await env.DB.prepare('SELECT * FROM packs WHERE id = ?').bind(body.packId).first();
   if (!pack) return corsJson({ error: 'pack_not_found' }, 404);
   if (!pack.is_premium || !pack.price_stars) return corsJson({ error: 'not_premium' }, 400);

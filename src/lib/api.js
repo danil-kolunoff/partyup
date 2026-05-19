@@ -44,6 +44,8 @@ export const api = {
   finishSession: (payload) => post('/api/session/finish', payload),
   leaderboard: (gameId) => get(`/api/leaderboard${gameId ? `?gameId=${gameId}` : ''}`),
   friends: () => get('/api/friends'),
+  // Создаёт ссылку на счёт Telegram Stars для покупки пака.
+  // Возвращает { invoiceUrl } — передаётся в tg.openInvoice().
   createInvoice: (packId) => post('/api/payments/invoice', { packId }),
   prepareShare: (payload) => post('/api/share/prepare', payload),
   roomInit: (id, body) => post(`/api/room/${id}/init`, body),

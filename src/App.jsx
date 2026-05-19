@@ -127,7 +127,6 @@ function filterPromptsByVibe(prompts, vibe) {
   if (vibe === 'ultra_adult') {
     const pool = prompts.filter(p => p.vibes?.includes('ultra_adult'))
     if (pool.length > 0) return pool
-    // fallback на adult, если ультра-набора пока нет
     const adult = prompts.filter(p => p.vibes?.includes('adult'))
     return adult.length > 0 ? adult : prompts.filter(p => !p.vibes)
   }
@@ -135,8 +134,16 @@ function filterPromptsByVibe(prompts, vibe) {
     const pool = prompts.filter(p => p.vibes?.includes('adult'))
     return pool.length > 0 ? pool : prompts.filter(p => !p.vibes)
   }
-  if (vibe === 'spicy') {
-    return prompts.filter(p => !p.vibes?.some(v => v === 'adult' || v === 'ultra_adult'))
+  // Премиум-вайбы (cringe, teambuilding): возвращаем только их карты.
+  // Если пул пуст (например, для редкой игры карт ещё не добавили), даём
+  // безопасный fallback на «нейтральные» карты без vibes.
+  if (vibe === 'cringe' || vibe === 'teambuilding') {
+    const pool = prompts.filter(p => p.vibes?.includes(vibe))
+    return pool.length > 0 ? pool : prompts.filter(p => !p.vibes)
+  }
+  if (vibe === 'family') {
+    const pool = prompts.filter(p => p.vibes?.includes('family'))
+    return pool.length > 0 ? pool : prompts.filter(p => !p.vibes)
   }
   return prompts.filter(p => !p.vibes || p.vibes.includes(vibe))
 }
@@ -197,8 +204,10 @@ function GameIcon({ gameId, size = 22, ...props }) {
 }
 
 const VIBE_ICONS_MAP = {
-  warmup: Wind, funny: Laugh, spicy: Flame, chill: Moon,
-  new_people: Handshake, deep: Heart, adult: Lock,
+  warmup: Wind, funny: Laugh, family: Home,
+  new_people: Handshake, deep: Heart,
+  teambuilding: Trophy, cringe: PartyPopper,
+  adult: Flame, ultra_adult: Lock,
 }
 function VibeIcon({ vibeId, size = 18, ...props }) {
   const Icon = VIBE_ICONS_MAP[vibeId] || Sparkles
@@ -265,6 +274,8 @@ export default function App() {
   const [profileFromGame, setProfileFromGame] = useState(false)
   const [showVibePicker, setShowVibePicker] = useState(false)
   const [focusJoinInput, setFocusJoinInput] = useState(false)
+  const [buyVibe, setBuyVibe] = useState(null) // объект VIBE для покупки
+  const [ownedPacks, setOwnedPacks] = useState([])
   // Краткая карточка чужого игрока (когда у него нет TG username и это не «я»).
   const [viewedPlayer, setViewedPlayer] = useState(null)
 
@@ -313,6 +324,24 @@ export default function App() {
   const [isMultiplayer, setIsMultiplayer] = useState(false)
   const [isHost, setIsHost] = useState(false)
   const auth = useUser()
+  // Синкаем ownedPacks с auth — при логине / после покупки массив обновится.
+  useEffect(() => {
+    if (Array.isArray(auth?.ownedPacks)) setOwnedPacks(auth.ownedPacks)
+  }, [auth?.ownedPacks])
+  // После успешной покупки опрашиваем /api/me ещё несколько раз — пока
+  // webhook не успеет проставить user_packs.
+  const refreshOwnedPacks = useCallback(async () => {
+    for (let i = 0; i < 6; i++) {
+      try {
+        const me = await api.me()
+        if (Array.isArray(me?.ownedPacks)) {
+          setOwnedPacks(me.ownedPacks)
+          if (buyVibe && me.ownedPacks.includes(buyVibe.packId)) return me.ownedPacks
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 1200))
+    }
+  }, [buyVibe])
   // myPlayerId: предпочитаем tg_id (стабильный), иначе random.
   // Когда auth подгрузится — апдейтим myPlayerId, чтобы в multiplayer быть тем же юзером.
   const [myPlayerId, setMyPlayerId] = useState(() => `p_${Math.random().toString(36).slice(2, 8)}`)
@@ -1002,6 +1031,8 @@ export default function App() {
       {showVibePicker && (
         <VibePickerModal
           currentVibe={picker.vibe}
+          ownedPacks={ownedPacks}
+          onBuy={(v) => { setBuyVibe(v); setShowVibePicker(false) }}
           onPick={(v) => {
             setPicker(p => ({ ...p, vibe: v }))
             ev.vibeChange(v)
@@ -1015,6 +1046,23 @@ export default function App() {
 
       {showWelcome && <WelcomeModal onClose={dismissWelcome} />}
       {viewedPlayer && <ViewedPlayerModal player={viewedPlayer} onClose={() => setViewedPlayer(null)} />}
+      {buyVibe && (
+        <PackPurchaseModal
+          vibe={buyVibe}
+          onClose={() => setBuyVibe(null)}
+          onPurchased={async () => {
+            // Опрашиваем /api/me — webhook успеет проставить user_packs.
+            const packs = await refreshOwnedPacks()
+            if (packs?.includes(buyVibe.packId)) {
+              setPicker(p => ({ ...p, vibe: buyVibe.id }))
+              ev.vibeChange(buyVibe.id)
+              haptic('success')
+              burstFromVibeBtn()
+            }
+            setBuyVibe(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1141,32 +1189,43 @@ function VibeBurst({ vibe, burst }) {
       return
     }
     setActive(true)
-    // Короче: 1.6 c вместо 3.8 — эмодзи быстро улетают и не мешают тапать.
-    const t = setTimeout(() => setActive(false), 1600)
+    // 2.2 c — взлёт + опадание. Длиннее, чем чистый разлёт, но не мешает тапу
+    // (pointer-events:none и opacity тает сразу после пика).
+    const t = setTimeout(() => setActive(false), 2200)
     return () => clearTimeout(t)
   }, [burstId, vibe])
 
-  // 10 эмодзи разлетаются от origin в 10 разных направлений (по кругу).
+  // 14 эмодзи: «петарда» — взлетают вверх веером, потом опадают листопадом.
+  // Каждой эмодзи задаём peak-position (через 0.4-0.55 c) и land-position
+  // (через 1.6-2.0 c). CSS-keyframes управляют дугой: подъём + горизонтальный
+  // дрейф + вращение + scale-пульс.
   const items = useMemo(() => {
     const set = VIBE_AMBIENT_EMOJI[vibe] || []
     if (!set.length) return []
-    return Array.from({ length: 10 }, (_, i) => {
+    return Array.from({ length: 14 }, (_, i) => {
       const seed = (burstId * 9301 + i * 49297) % 233280
       const rnd = (n) => ((seed * (i + 1) + n * 6151) % 1000) / 1000
-      // углы: примерно равномерно по кругу + лёгкий jitter
-      const baseAngle = (i / 10) * Math.PI * 2
-      const jitter = (rnd(1) - 0.5) * 0.5  // ±0.25 rad ≈ ±14°
+      // baseAngle: веер вверх (от -110° до -70°, ±20° = sin-cos = up-ish)
+      const spread = Math.PI * 0.85 // ~150°
+      const baseAngle = -Math.PI / 2 - spread / 2 + (i / 13) * spread
+      const jitter = (rnd(1) - 0.5) * 0.25
       const angle = baseAngle + jitter
-      const distance = 180 + rnd(2) * 220 // 180-400px от origin
-      const dx = Math.cos(angle) * distance
-      const dy = Math.sin(angle) * distance - 40 // лёгкая тенденция вверх
+      // дальность взлёта
+      const flyDist = 150 + rnd(2) * 180 // 150-330px
+      const peakX = Math.cos(angle) * flyDist
+      const peakY = Math.sin(angle) * flyDist
+      // горизонтальный дрейф при опадании (как листья)
+      const driftX = peakX + (rnd(3) - 0.5) * 80
+      // опадание ниже пика на полтора экрана
+      const landY = peakY + 280 + rnd(4) * 180
       return {
-        e: set[Math.floor(rnd(3) * set.length)],
-        size: 28 + Math.floor(rnd(4) * 36),  // 28-64px
-        rot: Math.floor(rnd(5) * 120) - 60,  // -60..60 deg
-        delay: rnd(6) * 0.18,                // 0-0.18s
-        dx, dy,
-        scale: 0.85 + rnd(7) * 0.4,         // 0.85-1.25
+        e: set[Math.floor(rnd(5) * set.length)],
+        size: 26 + Math.floor(rnd(6) * 32),  // 26-58px
+        rotPeak: (rnd(7) - 0.5) * 360,        // -180..180 deg
+        rotLand: (rnd(8) - 0.5) * 720,        // больше оборотов при опадании
+        delay: rnd(9) * 0.12,                  // 0-0.12s стартовый разнобой
+        peakX, peakY, driftX, landY,
+        scale: 0.95 + rnd(0) * 0.35,
       }
     })
   }, [burstId, vibe])
@@ -1182,9 +1241,12 @@ function VibeBurst({ vibe, burst }) {
           left: `${originX}px`,
           top: `${originY}px`,
           fontSize: `${it.size}px`,
-          '--rot': `${it.rot}deg`,
-          '--dx': `${it.dx}px`,
-          '--dy': `${it.dy}px`,
+          '--peak-x':  `${it.peakX}px`,
+          '--peak-y':  `${it.peakY}px`,
+          '--land-x':  `${it.driftX}px`,
+          '--land-y':  `${it.landY}px`,
+          '--rot-peak': `${it.rotPeak}deg`,
+          '--rot-land': `${it.rotLand}deg`,
           '--scl': it.scale,
           animationDelay: `${it.delay}s`,
         }}>{it.e}</span>
@@ -1222,7 +1284,7 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
               aria-label={`Сменить вайб (сейчас: ${vibe.label})`}
             >
               <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={22}/></span>
-              <span className="bnav-vibe-label">Вайб</span>
+              <span className="bnav-vibe-label">{vibe.label}</span>
             </button>
           )
         }
@@ -1246,11 +1308,13 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
 }
 
 /* ─── VibePickerModal — крупный, центральный, в один тап ────────────────── */
-function VibePickerModal({ currentVibe, onPick, onClose }) {
+function VibePickerModal({ currentVibe, onPick, onClose, ownedPacks = [], onBuy }) {
   const [showAdult, setShowAdult] = useState(null)
-  const pick = (id) => {
-    if ((id === 'adult' || id === 'ultra_adult') && id !== currentVibe) { setShowAdult(id); return }
-    onPick(id)
+  const owns = (v) => !v.premium || !v.packId || ownedPacks.includes(v.packId)
+  const pick = (v) => {
+    if (v.premium && !owns(v)) { onBuy?.(v); return }
+    if ((v.id === 'adult' || v.id === 'ultra_adult') && v.id !== currentVibe) { setShowAdult(v.id); return }
+    onPick(v.id)
   }
   const confirmAdult = () => { onPick(showAdult); setShowAdult(null) }
   return (
@@ -1262,19 +1326,24 @@ function VibePickerModal({ currentVibe, onPick, onClose }) {
           Влияет на <b>вопросы, задания и тон</b> карточек во всех играх.
         </p>
         <div className="vibe-picker-grid">
-          {VIBES.map(v => (
-            <button
-              key={v.id}
-              className={`vibe-picker-tile ${v.id === currentVibe ? 'is-active' : ''}`}
-              data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
-              onClick={() => pick(v.id)}
-            >
-              <span className="vibe-picker-icon"><VibeIcon vibeId={v.id} size={28}/></span>
-              <span className="vibe-picker-label">{v.label}</span>
-              <span className="vibe-picker-hint">{v.hint}</span>
-              {v.id === currentVibe && <Check size={14} className="vibe-picker-check"/>}
-            </button>
-          ))}
+          {VIBES.map(v => {
+            const owned = owns(v)
+            const locked = v.premium && !owned
+            return (
+              <button
+                key={v.id}
+                className={`vibe-picker-tile ${v.id === currentVibe ? 'is-active' : ''} ${locked ? 'is-locked' : ''}`}
+                data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+                onClick={() => pick(v)}
+              >
+                <span className="vibe-picker-icon"><VibeIcon vibeId={v.id} size={28}/></span>
+                <span className="vibe-picker-label">{v.label}</span>
+                <span className="vibe-picker-hint">{v.hint}</span>
+                {locked && <span className="vibe-picker-lock"><Lock size={11}/> {v.priceStars}★</span>}
+                {v.id === currentVibe && !locked && <Check size={14} className="vibe-picker-check"/>}
+              </button>
+            )
+          })}
         </div>
         <button className="btn-ghost" style={{width: '100%', justifyContent: 'center', marginTop: 18}} onClick={onClose}>
           <X size={15}/> Закрыть
@@ -1282,6 +1351,56 @@ function VibePickerModal({ currentVibe, onPick, onClose }) {
         {showAdult && (
           <AdultWarningModal vibe={showAdult} onConfirm={confirmAdult} onCancel={() => setShowAdult(null)}/>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ─── PackPurchaseModal — экран покупки одного пака за Telegram Stars ───── */
+function PackPurchaseModal({ vibe, onPurchased, onClose }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const buy = async () => {
+    setBusy(true); setErr(null)
+    try {
+      const r = await api.createInvoice(vibe.packId)
+      if (!r?.invoiceUrl) throw new Error(r?.error || 'no_invoice')
+      const tg = window.Telegram?.WebApp
+      if (tg?.openInvoice) {
+        tg.openInvoice(r.invoiceUrl, (status) => {
+          setBusy(false)
+          if (status === 'paid') onPurchased?.()
+          else if (status === 'cancelled') {} // closed silently
+          else if (status === 'failed') setErr('Платёж не прошёл')
+          else if (status === 'pending') {} // ожидаем webhook
+        })
+      } else {
+        // web-режим — откроем ссылку, успех проверится по next /api/me poll
+        window.open(r.invoiceUrl, '_blank', 'noopener')
+        setBusy(false)
+      }
+    } catch (e) { setErr(e?.message || 'Ошибка'); setBusy(false) }
+  }
+  return (
+    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="welcome-modal" onClick={e => e.stopPropagation()} style={{textAlign: 'center', padding: '24px 22px'}}>
+        <div style={{fontSize: 48, marginBottom: 10}}>{vibe.icon}</div>
+        <h2 className="gradient-text" style={{margin: '0 0 4px'}}>{vibe.label}</h2>
+        <p className="lead" style={{margin: '0 0 16px'}}>{vibe.hint}</p>
+        <div className="pack-buy-price">
+          <Lock size={14}/> Премиум-пак · <b>{vibe.priceStars} ★</b>
+        </div>
+        <p className="muted" style={{fontSize: 12, marginTop: 12, lineHeight: 1.5}}>
+          Покупка через Telegram Stars. После оплаты пак сразу доступен
+          во всех играх — никаких подписок и автосписаний.
+        </p>
+        {err && <div className="pack-buy-err"><X size={13}/> {err}</div>}
+        <button className="btn-primary" style={{width: '100%', marginTop: 16}} disabled={busy} onClick={buy}>
+          {busy ? 'Открываем оплату…' : <>⭐ Купить за {vibe.priceStars} Stars</>}
+        </button>
+        <button className="btn-ghost" style={{width: '100%', justifyContent: 'center', marginTop: 8}} onClick={onClose}>
+          Не сейчас
+        </button>
       </div>
     </div>
   )
