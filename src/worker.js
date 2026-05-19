@@ -1555,7 +1555,8 @@ let LAST_STATS = null;
 const TABS = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'cards',     label: '🃏 Карточки' },
-  { id: 'packs',     label: '📦 Паки' },
+  { id: 'vibes',     label: '🎨 Вайбы' },
+  { id: 'games',     label: '🎮 Игры' },
   { id: 'users',     label: '👤 Юзеры' },
   { id: 'sessions',  label: '🎮 Сессии' },
   { id: 'events',    label: '📡 События' },
@@ -1576,7 +1577,7 @@ function renderTabs() {
 function render() {
   const view = $('#view'); view.innerHTML = '';
   ({
-    dashboard: viewDashboard, cards: viewCards, packs: viewPacks,
+    dashboard: viewDashboard, cards: viewCards, vibes: viewVibes, games: viewGames,
     users: viewUsers, sessions: viewSessions, events: viewEvents, rooms: viewRooms,
   })[activeTab](view);
 }
@@ -1769,43 +1770,51 @@ async function viewDashboard(root) {
       ));
     });
     root.appendChild(evWrap);
-    // Покрытие контента: матрица «игра × вайб». Карточки могут иметь несколько
-    // тегов сразу — суммируем по каждому, чтобы видеть реальный пул на вайб.
+    // Покрытие контента: матрица «игра × вайб» строится ДИНАМИЧЕСКИ из
+    // catalog API. Показываем только active=true вайбы и игры — таблица
+    // автоматически адаптируется когда админ что-то отключит во вкладках
+    // Вайбы/Игры.
     root.appendChild(h('h2', {}, 'Покрытие контента'));
-    const byGV = s.byGameVibe || [];
-    const games = [...new Set(byGV.map(r => r.game_id))].sort();
-    const pivot = {}; // pivot[game][vibe] = n
-    const noTag = {}; // карточки без вайба
-    games.forEach(g => { pivot[g] = {}; noTag[g] = 0; });
-    byGV.forEach(r => {
-      const vibes = (r.vibes || '').split(',').filter(Boolean);
-      if (!vibes.length) noTag[r.game_id] = (noTag[r.game_id] || 0) + r.n;
-      else vibes.forEach(v => { pivot[r.game_id][v] = (pivot[r.game_id][v] || 0) + r.n; });
-    });
-    // Колонки = ВСЕ известные вайбы + «без тега». Гарантируем стабильный порядок.
-    const cov = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
-    const cellClass = (n) => n === 0 ? 'cov-zero' : n < 20 ? 'cov-low' : n < 60 ? 'cov-mid' : 'cov-high';
-    cov.appendChild(h('table', { class: 'cov-table' },
-      h('thead', {}, h('tr', {},
-        h('th', {}, 'Игра'),
-        ...VIBES.map(v => h('th', { class: v==='adult'||v==='ultra_adult' ? 'cov-adult' : null }, v)),
-        h('th', {}, '∅'),
-        h('th', {}, 'Σ'),
-      )),
-      h('tbody', {}, games.map(g => {
-        const total = VIBES.reduce((s, v) => s + (pivot[g][v] || 0), 0) + (noTag[g] || 0);
-        return h('tr', {},
-          h('td', { class: 'type' }, g),
-          ...VIBES.map(v => {
-            const n = pivot[g][v] || 0;
-            return h('td', { class: 'cov-cell ' + cellClass(n) }, n ? String(n) : '·');
-          }),
-          h('td', { class: 'cov-cell ' + cellClass(noTag[g] || 0) }, noTag[g] ? String(noTag[g]) : '·'),
-          h('td', { class: 'cov-cell cov-sum' }, String(total)),
-        );
-      })),
-    ));
-    root.appendChild(cov);
+    const covHost = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
+    root.appendChild(covHost);
+    (async () => {
+      try {
+        const [vibesD, gamesD] = await Promise.all([api('/api/admin/vibes'), api('/api/admin/games')]);
+        const activeVibes = (vibesD.rows || []).filter(v => v.active);
+        const activeGames = (gamesD.rows || []).filter(g => g.active);
+        const byGV = s.byGameVibe || [];
+        const pivot = {}; const noTag = {};
+        activeGames.forEach(g => { pivot[g.id] = {}; noTag[g.id] = 0; });
+        byGV.forEach(r => {
+          if (!pivot[r.game_id]) return;
+          const vibes = (r.vibes || '').split(',').filter(Boolean);
+          if (!vibes.length) noTag[r.game_id] += r.n;
+          else vibes.forEach(v => { pivot[r.game_id][v] = (pivot[r.game_id][v] || 0) + r.n; });
+        });
+        const cellClass = (n) => n === 0 ? 'cov-zero' : n < 20 ? 'cov-low' : n < 60 ? 'cov-mid' : 'cov-high';
+        covHost.innerHTML = '';
+        covHost.appendChild(h('table', { class: 'cov-table' },
+          h('thead', {}, h('tr', {},
+            h('th', {}, 'Игра'),
+            ...activeVibes.map(v => h('th', { class: v.premium ? 'cov-adult' : null }, v.label)),
+            h('th', {}, '∅'),
+            h('th', {}, 'Σ'),
+          )),
+          h('tbody', {}, activeGames.map(g => {
+            const total = activeVibes.reduce((s, v) => s + (pivot[g.id][v.id] || 0), 0) + (noTag[g.id] || 0);
+            return h('tr', {},
+              h('td', { class: 'type' }, g.title),
+              ...activeVibes.map(v => {
+                const n = pivot[g.id][v.id] || 0;
+                return h('td', { class: 'cov-cell ' + cellClass(n) }, n ? String(n) : '·');
+              }),
+              h('td', { class: 'cov-cell ' + cellClass(noTag[g.id] || 0) }, noTag[g.id] ? String(noTag[g.id]) : '·'),
+              h('td', { class: 'cov-cell cov-sum' }, String(total)),
+            );
+          })),
+        ));
+      } catch (e) { covHost.innerHTML = '<div class="empty">Ошибка загрузки матрицы: ' + esc(e.message) + '</div>'; }
+    })();
     root.appendChild(h('h2', {}, 'Последние сессии'));
     const rs = h('div', { class: 'card', style: 'padding: 0; overflow: auto;' });
     rs.appendChild(h('table', {},
@@ -2082,85 +2091,130 @@ function openBulkImport() {
   bg.appendChild(modal); document.body.appendChild(bg);
 }
 
-/* ─── Packs ────────────────────────────────────────────────────────────── */
-async function viewPacks(root) {
+/* ─── Vibes manage ─────────────────────────────────────────────────────── */
+async function viewVibes(root) {
   root.appendChild(h('div', { class: 'tools' },
-    h('span', { class: 'muted' }, 'Паки карточек (id, title, game_id, vibe, premium, price_stars).'),
-    h('span', { class: 'spacer', style: 'flex:1' }),
-    h('button', { class: 'primary', onclick: () => openPackModal(null) }, '+ Новый pack'),
+    h('span', { class: 'muted' }, 'Все вайбы из каталога. Тогглы и цены сохраняются мгновенно.'),
   ));
   const wrap = h('div', {}); root.appendChild(wrap);
   async function refresh() {
     wrap.innerHTML = '<div class="muted">Загружаем…</div>';
     try {
-      const d = await api('/api/admin/packs');
+      const d = await api('/api/admin/vibes');
       wrap.innerHTML = '';
-      if (!d.rows.length) { wrap.appendChild(h('div', { class: 'empty' }, 'Пусто. Создай первый pack.')); return; }
       wrap.appendChild(h('table', {},
         h('thead', {}, h('tr', {},
-          h('th', {}, 'id'), h('th', {}, 'title'), h('th', {}, 'game'), h('th', {}, 'vibe'),
-          h('th', {}, 'premium'), h('th', {}, '★ цена'), h('th', {}, 'карт'), h('th', {}, ''),
+          h('th', {}, ''), h('th', {}, 'id'), h('th', {}, 'label'),
+          h('th', {}, 'hint'), h('th', {}, 'active'),
+          h('th', {}, 'premium'), h('th', {}, '★ цена'),
+          h('th', {}, 'карт'), h('th', {}, ''),
         )),
-        h('tbody', {}, d.rows.map(p => h('tr', {},
-          h('td', { class: 'id' }, p.id),
-          h('td', {}, p.title),
-          h('td', { class: 'type' }, p.game_id || '—'),
-          h('td', {}, p.vibe || '—'),
-          h('td', {}, p.is_premium ? h('span', { class: 'chip warn' }, '★') : ''),
-          h('td', {}, String(p.price_stars || 0)),
-          h('td', { class: 'intensity intensity-2' }, String(p.cards_count || 0)),
-          h('td', { class: 'acts' },
-            h('button', { onclick: () => openPackModal(p, refresh) }, '✎'),
-            ' ',
-            h('button', { class: 'danger', onclick: async () => {
-              if (!confirm('Удалить pack «' + p.id + '»? Карточки отвяжутся, но не удалятся.')) return;
-              await api('/api/admin/packs/' + encodeURIComponent(p.id), { method: 'DELETE' });
-              toast('Удалено', 'ok'); refresh();
-            }}, '🗑'),
-          ),
-        ))),
+        h('tbody', {}, d.rows.map(v => makeVibeRow(v, refresh))),
       ));
     } catch (e) { wrap.innerHTML = '<div class="empty">Ошибка: ' + esc(e.message) + '</div>'; }
   }
   refresh();
-  window._packsRefresh = refresh;
 }
-function openPackModal(p, refresh) {
-  const isEdit = !!p;
-  const data = p ? { ...p } : { id: '', title: '', description: '', game_id: '', vibe: '', is_premium: false, price_stars: 0 };
-  const idIn = h('input', { value: data.id, disabled: isEdit ? '' : null });
-  const titleIn = h('input', { value: data.title || '' });
-  const descIn = h('textarea', {}, data.description || '');
-  const gameIn = h('input', { value: data.game_id || '' });
-  const vibeIn = h('input', { value: data.vibe || '' });
-  const premCb = h('input', { type: 'checkbox' }); premCb.checked = !!data.is_premium;
-  const priceIn = h('input', { type: 'number', min: 0, value: data.price_stars || 0 });
+function makeVibeRow(v, refresh) {
+  const icon = h('span', { style: 'font-size:20px' }, v.icon || '✨');
+  const activeCb = h('input', { type: 'checkbox' }); activeCb.checked = v.active;
+  activeCb.onchange = async () => {
+    await api('/api/admin/vibes/' + v.id, { method: 'PATCH', body: { active: activeCb.checked } });
+    toast(activeCb.checked ? 'Вайб включён' : 'Вайб скрыт', 'ok');
+  };
+  const premCb = h('input', { type: 'checkbox' }); premCb.checked = v.premium;
+  premCb.onchange = async () => {
+    await api('/api/admin/vibes/' + v.id, { method: 'PATCH', body: { premium: premCb.checked } });
+    toast('Сохранено', 'ok'); refresh();
+  };
+  const priceIn = h('input', { type: 'number', min: 0, max: 9999, value: v.priceStars || 0, style: 'width:70px' });
+  let priceTimer = null;
+  priceIn.oninput = () => {
+    clearTimeout(priceTimer);
+    priceTimer = setTimeout(async () => {
+      await api('/api/admin/vibes/' + v.id, { method: 'PATCH', body: { price_stars: Number(priceIn.value) || 0 } });
+      toast('Цена сохранена', 'ok');
+    }, 600);
+  };
+  return h('tr', {},
+    h('td', {}, icon),
+    h('td', { class: 'id' }, v.id),
+    h('td', { class: 'type' }, v.label),
+    h('td', { class: 'muted' }, v.hint),
+    h('td', {}, activeCb),
+    h('td', {}, premCb),
+    h('td', {}, v.premium ? priceIn : h('span', { class: 'muted' }, '—')),
+    h('td', { class: 'intensity intensity-2' }, String(v.cards_count || 0)),
+    h('td', { class: 'acts' },
+      h('button', { onclick: () => openVibeEditModal(v, refresh) }, '✎'),
+    ),
+  );
+}
+function openVibeEditModal(v, refresh) {
+  const labelIn = h('input', { value: v.label });
+  const hintIn = h('input', { value: v.hint });
   const bg = h('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
   const modal = h('div', { class: 'modal' });
-  modal.appendChild(h('h3', {}, isEdit ? 'Редактировать pack «' + p.id + '»' : 'Новый pack'));
-  [['id *', idIn], ['title *', titleIn], ['description', descIn], ['game_id', gameIn],
-   ['vibe', vibeIn], ['premium', premCb], ['★ цена', priceIn]
-  ].forEach(([l, el]) => modal.appendChild(h('div', { class: 'form-row' }, h('label', {}, l), el)));
-  modal.appendChild(h('div', { class: 'row', style: 'justify-content: flex-end; gap: 8px; margin-top: 12px;' },
+  modal.appendChild(h('h3', {}, 'Вайб «' + v.id + '» ' + v.icon));
+  [['label', labelIn], ['hint', hintIn]].forEach(([l, el]) =>
+    modal.appendChild(h('div', { class: 'form-row' }, h('label', {}, l), el))
+  );
+  modal.appendChild(h('div', { style: 'display:flex; justify-content:flex-end; gap:8px; margin-top:12px;' },
     h('button', { onclick: () => bg.remove() }, 'Отмена'),
     h('button', { class: 'primary', onclick: async () => {
-      const payload = {
-        id: idIn.value.trim(), title: titleIn.value.trim(),
-        description: descIn.value.trim() || null,
-        game_id: gameIn.value.trim() || null, vibe: vibeIn.value.trim() || null,
-        is_premium: premCb.checked, price_stars: Number(priceIn.value) || 0,
-      };
-      if (isEdit) {
-        delete payload.id;
-        await api('/api/admin/packs/' + encodeURIComponent(p.id), { method: 'PATCH', body: payload });
-      } else {
-        if (!payload.id || !payload.title) return toast('id и title обязательны', 'err');
-        await api('/api/admin/packs', { method: 'POST', body: payload });
-      }
-      toast('Сохранено', 'ok'); bg.remove(); (refresh || window._packsRefresh)?.();
+      await api('/api/admin/vibes/' + v.id, { method: 'PATCH', body: {
+        label: labelIn.value.trim() || null,
+        hint: hintIn.value.trim() || null,
+      }});
+      toast('Сохранено', 'ok'); bg.remove(); refresh();
     }}, 'Сохранить'),
   ));
   bg.appendChild(modal); document.body.appendChild(bg);
+}
+
+/* ─── Games manage ─────────────────────────────────────────────────────── */
+async function viewGames(root) {
+  root.appendChild(h('div', { class: 'tools' },
+    h('span', { class: 'muted' }, 'Все игры из каталога. «Simple» = в основном списке; «Active» = виден в приложении.'),
+  ));
+  const wrap = h('div'); root.appendChild(wrap);
+  async function refresh() {
+    wrap.innerHTML = '<div class="muted">Загружаем…</div>';
+    try {
+      const d = await api('/api/admin/games');
+      wrap.innerHTML = '';
+      wrap.appendChild(h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', {}, ''), h('th', {}, 'id'), h('th', {}, 'title'),
+          h('th', {}, 'категория'), h('th', {}, 'simple'),
+          h('th', {}, 'active'), h('th', {}, 'карт'),
+        )),
+        h('tbody', {}, d.rows.map(g => makeGameRow(g, refresh))),
+      ));
+    } catch (e) { wrap.innerHTML = '<div class="empty">Ошибка: ' + esc(e.message) + '</div>'; }
+  }
+  refresh();
+}
+function makeGameRow(g, refresh) {
+  const activeCb = h('input', { type: 'checkbox' }); activeCb.checked = g.active;
+  activeCb.onchange = async () => {
+    await api('/api/admin/games/' + g.id, { method: 'PATCH', body: { active: activeCb.checked } });
+    toast(activeCb.checked ? 'Игра видна в приложении' : 'Игра скрыта', 'ok');
+  };
+  const simpleCb = h('input', { type: 'checkbox' }); simpleCb.checked = g.simple;
+  simpleCb.onchange = async () => {
+    await api('/api/admin/games/' + g.id, { method: 'PATCH', body: { simple: simpleCb.checked } });
+    toast('Сохранено', 'ok'); refresh();
+  };
+  return h('tr', {},
+    h('td', {}, h('span', { style: 'font-size:20px' }, g.emoji)),
+    h('td', { class: 'id' }, g.id),
+    h('td', { class: 'type' }, g.title),
+    h('td', { class: 'muted' }, g.category),
+    h('td', {}, simpleCb),
+    h('td', {}, activeCb),
+    h('td', { class: 'intensity intensity-2' }, String(g.cards_count || 0)),
+  );
 }
 
 /* ─── Users ────────────────────────────────────────────────────────────── */
@@ -2805,63 +2859,194 @@ async function handleAdminCardsBulk(request, env) {
 }
 
 /* ─── Admin: packs CRUD ──────────────────────────────────────────────────── */
-async function handleAdminPacks(request, env, method, idStr) {
+/* ─── Catalog: vibes & games — server-side source of truth ──────────────── */
+// Каталог зеркалирует games.js на стороне worker. Override'ы хранятся в D1
+// (vibes_meta / games_meta). Для каждого id берём дефолты из каталога, потом
+// перекрываем значениями из БД. Это даёт админке полное управление без
+// необходимости коммитить код для смены цены/статуса.
+const VIBES_CATALOG = [
+  { id: 'warmup',       label: 'Разогрев',     icon: '✨', hint: 'быстрый старт',        defaultPremium: false, defaultPrice: 0   },
+  { id: 'funny',        label: 'Смешной',      icon: '😂', hint: 'больше смеха',         defaultPremium: false, defaultPrice: 0   },
+  { id: 'family',       label: 'Семейный',     icon: '🏠', hint: 'для всех возрастов',   defaultPremium: false, defaultPrice: 0   },
+  { id: 'new_people',   label: 'Новые люди',   icon: '🤝', hint: 'познакомиться',        defaultPremium: false, defaultPrice: 0   },
+  { id: 'deep',         label: 'Близкие',      icon: '❤️', hint: 'глубже',               defaultPremium: false, defaultPrice: 0   },
+  { id: 'teambuilding', label: 'Тимбилдинг',   icon: '💼', hint: 'для коллег',           defaultPremium: true,  defaultPrice: 99  },
+  { id: 'cringe',       label: 'Кринж',        icon: '🤡', hint: 'неловкие моменты',     defaultPremium: true,  defaultPrice: 99  },
+  { id: 'adult',        label: '18+',          icon: '🔞', hint: 'горячие вопросы',      defaultPremium: false, defaultPrice: 0   },
+  { id: 'ultra_adult',  label: '24+',          icon: '💋', hint: 'самые откровенные',    defaultPremium: true,  defaultPrice: 149 },
+];
+
+// Каталог игр. simple = «показывается в основном списке». Параметры
+// игры (кол-во карт по умолчанию, есть ли timer и т.д.) — для будущего
+// расширения, сейчас просто метаданные.
+const GAMES_CATALOG = [
+  { id: 'truth',        title: 'Правда или действие',     emoji: '🎯', defaultSimple: true,  category: 'действия'   },
+  { id: 'never',        title: 'Я никогда не…',           emoji: '🙅', defaultSimple: true,  category: 'вопросы'    },
+  { id: 'whoofus',      title: 'Кто из нас',              emoji: '👥', defaultSimple: true,  category: 'голосование' },
+  { id: 'most',         title: 'Кто скорее всего',        emoji: '📊', defaultSimple: true,  category: 'голосование' },
+  { id: 'five',         title: '5 секунд',                emoji: '⏱️', defaultSimple: true,  category: 'скорость'   },
+  { id: 'associations', title: 'Ассоциации',              emoji: '🧠', defaultSimple: true,  category: 'слова'      },
+  { id: 'spy',          title: 'Шпион',                   emoji: '🕵️', defaultSimple: false, category: 'детектив'  },
+  { id: 'crocodile',    title: 'Крокодил',                emoji: '🐊', defaultSimple: false, category: 'объяснялки' },
+  { id: 'alias',        title: 'Элиас',                   emoji: '🗣️', defaultSimple: false, category: 'объяснялки' },
+  { id: 'mafia',        title: 'Мафия',                   emoji: '🎭', defaultSimple: false, category: 'детектив'   },
+  { id: 'bunker',       title: 'Бункер',                  emoji: '☢️', defaultSimple: false, category: 'ролевые'    },
+  { id: 'memes',        title: 'Мем-батл',                emoji: '😂', defaultSimple: false, category: 'мемы'       },
+  { id: 'whoami',       title: 'Кто я?',                  emoji: '❓', defaultSimple: false, category: 'угадайка'   },
+  { id: 'fact',         title: 'Угадай факт о друге',     emoji: '🔍', defaultSimple: false, category: 'угадайка'   },
+  { id: 'hot_seat',     title: 'Горячий стул',            emoji: '🔥', defaultSimple: false, category: 'вопросы'    },
+  { id: 'taboo',        title: 'Табу',                    emoji: '🚫', defaultSimple: false, category: 'объяснялки' },
+];
+
+// Ленивая инициализация табличек overrides — без миграции, на on-demand.
+async function ensureMetaTables(env) {
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS vibes_meta (
+      id TEXT PRIMARY KEY, active INTEGER DEFAULT 1, premium INTEGER, price_stars INTEGER,
+      label TEXT, hint TEXT, updated_at INTEGER
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS games_meta (
+      id TEXT PRIMARY KEY, active INTEGER DEFAULT 1, simple INTEGER, updated_at INTEGER
+    )`),
+  ]);
+}
+
+async function getEffectiveVibes(env) {
+  await ensureMetaTables(env);
+  const rs = await env.DB.prepare('SELECT * FROM vibes_meta').all();
+  const overrides = Object.fromEntries((rs.results || []).map(r => [r.id, r]));
+  return VIBES_CATALOG.map(v => {
+    const o = overrides[v.id] || {};
+    const premium = o.premium != null ? !!o.premium : v.defaultPremium;
+    const priceStars = o.price_stars != null ? Number(o.price_stars) : v.defaultPrice;
+    return {
+      id: v.id,
+      label: o.label || v.label,
+      icon: v.icon,
+      hint: o.hint || v.hint,
+      active: o.active != null ? !!o.active : true,
+      premium,
+      priceStars,
+      packId: premium ? `pack_${v.id}` : null,
+    };
+  });
+}
+
+async function getEffectiveGames(env) {
+  await ensureMetaTables(env);
+  const rs = await env.DB.prepare('SELECT * FROM games_meta').all();
+  const overrides = Object.fromEntries((rs.results || []).map(r => [r.id, r]));
+  return GAMES_CATALOG.map(g => {
+    const o = overrides[g.id] || {};
+    return {
+      id: g.id,
+      title: g.title,
+      emoji: g.emoji,
+      category: g.category,
+      simple: o.simple != null ? !!o.simple : g.defaultSimple,
+      active: o.active != null ? !!o.active : true,
+    };
+  });
+}
+
+/* ─── Public catalog (для фронта — фильтрует только active=true) ─────────── */
+async function handleCatalog(request, env) {
+  try {
+    const [vibes, games] = await Promise.all([getEffectiveVibes(env), getEffectiveGames(env)]);
+    return corsJson({
+      ok: true,
+      vibes: vibes.filter(v => v.active),
+      games: games.filter(g => g.active),
+    });
+  } catch (e) {
+    return corsJson({ error: 'catalog_failed', detail: String(e) }, 500);
+  }
+}
+
+/* ─── Admin: vibes manage ───────────────────────────────────────────────── */
+async function handleAdminVibes(request, env, method, idStr) {
   const guard = await requireAdmin(request, env);
   if (!guard.ok) return guard.response;
-
   if (method === 'GET' && !idStr) {
-    const rs = await env.DB.prepare(
-      `SELECT p.id, p.title, p.description, p.game_id, p.vibe, p.is_premium, p.price_stars,
-              p.created_at, (SELECT COUNT(*) FROM cards WHERE pack_id = p.id) AS cards_count
-       FROM packs p ORDER BY p.created_at DESC`
+    const vibes = await getEffectiveVibes(env);
+    // На каждый вайб — счётчик активных карточек в БД (по vibe-тегу в csv).
+    const counts = await env.DB.prepare(
+      `SELECT vibes, COUNT(*) AS n FROM cards WHERE approved=1 AND vibes IS NOT NULL AND vibes <> '' GROUP BY vibes`
     ).all();
-    return adminJson({ ok: true, rows: rs.results || [] });
+    const cardsByVibe = {};
+    for (const r of counts.results || []) {
+      for (const v of String(r.vibes).split(',')) {
+        const k = v.trim(); if (!k) continue;
+        cardsByVibe[k] = (cardsByVibe[k] || 0) + r.n;
+      }
+    }
+    return adminJson({ ok: true, rows: vibes.map(v => ({ ...v, cards_count: cardsByVibe[v.id] || 0 })) });
   }
-
-  if (method === 'POST' && !idStr) {
-    const body = await request.json().catch(() => ({}));
-    if (!body.id || !body.title) return adminJson({ error: 'missing_fields' }, 400);
-    await env.DB.prepare(
-      `INSERT INTO packs (id, title, description, game_id, vibe, is_premium, price_stars, cards_count, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`
-    ).bind(
-      String(body.id),
-      String(body.title),
-      body.description ? String(body.description) : null,
-      body.game_id ? String(body.game_id) : null,
-      body.vibe ? String(body.vibe) : null,
-      body.is_premium ? 1 : 0,
-      Number(body.price_stars) || 0,
-      0,
-      now(),
-    ).run();
-    return adminJson({ ok: true, id: body.id });
-  }
-
   if (method === 'PATCH' && idStr) {
     const body = await request.json().catch(() => ({}));
-    const sets = []; const args = [];
-    const strFields = ['title', 'description', 'game_id', 'vibe'];
-    for (const k of strFields) {
-      if (k in body) { sets.push(`${k} = ?`); args.push(body[k] == null ? null : String(body[k])); }
-    }
-    if ('is_premium' in body) { sets.push('is_premium = ?'); args.push(body.is_premium ? 1 : 0); }
-    if ('price_stars' in body) { sets.push('price_stars = ?'); args.push(Number(body.price_stars) || 0); }
-    if (!sets.length) return adminJson({ error: 'no_fields' }, 400);
-    args.push(String(idStr));
-    await env.DB.prepare(`UPDATE packs SET ${sets.join(', ')} WHERE id = ?`).bind(...args).run();
+    const known = VIBES_CATALOG.find(v => v.id === idStr);
+    if (!known) return adminJson({ error: 'unknown_vibe' }, 404);
+    await ensureMetaTables(env);
+    const ts = now();
+    // upsert
+    await env.DB.prepare(
+      `INSERT INTO vibes_meta (id, active, premium, price_stars, label, hint, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         active = COALESCE(excluded.active, vibes_meta.active),
+         premium = COALESCE(excluded.premium, vibes_meta.premium),
+         price_stars = COALESCE(excluded.price_stars, vibes_meta.price_stars),
+         label = COALESCE(excluded.label, vibes_meta.label),
+         hint = COALESCE(excluded.hint, vibes_meta.hint),
+         updated_at = excluded.updated_at`
+    ).bind(
+      idStr,
+      'active' in body ? (body.active ? 1 : 0) : null,
+      'premium' in body ? (body.premium ? 1 : 0) : null,
+      'price_stars' in body ? Number(body.price_stars) || 0 : null,
+      'label' in body ? (body.label == null ? null : String(body.label)) : null,
+      'hint' in body ? (body.hint == null ? null : String(body.hint)) : null,
+      ts,
+    ).run();
     return adminJson({ ok: true });
   }
+  return adminJson({ error: 'method_not_allowed' }, 405);
+}
 
-  if (method === 'DELETE' && idStr) {
-    // Удаляем pack + разлинковываем карточки (pack_id → NULL), не удаляя сами карточки.
-    await env.DB.batch([
-      env.DB.prepare(`UPDATE cards SET pack_id = NULL WHERE pack_id = ?`).bind(String(idStr)),
-      env.DB.prepare(`DELETE FROM packs WHERE id = ?`).bind(String(idStr)),
-    ]);
+/* ─── Admin: games manage ───────────────────────────────────────────────── */
+async function handleAdminGames(request, env, method, idStr) {
+  const guard = await requireAdmin(request, env);
+  if (!guard.ok) return guard.response;
+  if (method === 'GET' && !idStr) {
+    const games = await getEffectiveGames(env);
+    // Счётчик карт по game_id для контекста.
+    const counts = await env.DB.prepare(
+      `SELECT game_id, COUNT(*) AS n FROM cards WHERE approved=1 GROUP BY game_id`
+    ).all();
+    const cardsByGame = Object.fromEntries((counts.results || []).map(r => [r.game_id, r.n]));
+    return adminJson({ ok: true, rows: games.map(g => ({ ...g, cards_count: cardsByGame[g.id] || 0 })) });
+  }
+  if (method === 'PATCH' && idStr) {
+    const body = await request.json().catch(() => ({}));
+    const known = GAMES_CATALOG.find(g => g.id === idStr);
+    if (!known) return adminJson({ error: 'unknown_game' }, 404);
+    await ensureMetaTables(env);
+    const ts = now();
+    await env.DB.prepare(
+      `INSERT INTO games_meta (id, active, simple, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         active = COALESCE(excluded.active, games_meta.active),
+         simple = COALESCE(excluded.simple, games_meta.simple),
+         updated_at = excluded.updated_at`
+    ).bind(
+      idStr,
+      'active' in body ? (body.active ? 1 : 0) : null,
+      'simple' in body ? (body.simple ? 1 : 0) : null,
+      ts,
+    ).run();
     return adminJson({ ok: true });
   }
-
   return adminJson({ error: 'method_not_allowed' }, 405);
 }
 
@@ -3240,11 +3425,19 @@ export default {
       const m = url.pathname.match(/^\/api\/admin\/cards\/(\d+)$/);
       if (m && (method === 'PATCH' || method === 'DELETE')) return handleAdminCards(request, env, method, m[1]);
     }
-    if (url.pathname === ADMIN_PATH + '/packs' && (method === 'GET' || method === 'POST')) return handleAdminPacks(request, env, method, null);
+    // Vibes & Games management — заменяет старый packs-эндпоинт.
+    if (url.pathname === ADMIN_PATH + '/vibes' && method === 'GET') return handleAdminVibes(request, env, method, null);
     {
-      const m = url.pathname.match(/^\/api\/admin\/packs\/([^/]+)$/);
-      if (m && (method === 'PATCH' || method === 'DELETE')) return handleAdminPacks(request, env, method, decodeURIComponent(m[1]));
+      const m = url.pathname.match(/^\/api\/admin\/vibes\/([a-z_]+)$/);
+      if (m && method === 'PATCH') return handleAdminVibes(request, env, method, m[1]);
     }
+    if (url.pathname === ADMIN_PATH + '/games' && method === 'GET') return handleAdminGames(request, env, method, null);
+    {
+      const m = url.pathname.match(/^\/api\/admin\/games\/([a-z_]+)$/);
+      if (m && method === 'PATCH') return handleAdminGames(request, env, method, m[1]);
+    }
+    // Публичный каталог — для фронта (фильтрует только active=true).
+    if (url.pathname === '/api/catalog' && method === 'GET') return handleCatalog(request, env);
     if (url.pathname === ADMIN_PATH + '/users' && method === 'GET') return handleAdminUsers(request, env, method, null);
     {
       const m = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
