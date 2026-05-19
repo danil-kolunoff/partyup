@@ -453,6 +453,34 @@ export default function App() {
 
   const openGame = useCallback((gameId) => { haptic(); ev.gameSelect(gameId); navigate(SCREENS.DETAIL, gameId) }, [haptic, navigate])
 
+  // Универсальный обработчик клика по аватарке игрока в лобби/раунде.
+  // ВАЖНО: клик по СВОЕЙ аватарке всегда открывает профиль (в т.ч. в
+  // локальной игре, где у меня нет telegramId — там определяемся через
+  // myPlayerId). Чужие с username → TG-чат, иначе мини-модалка.
+  const handlePlayerAvatarClick = useCallback((p) => {
+    if (!p) return
+    const myTg = auth?.tgUser?.id ?? auth?.user?.tg_id ?? null
+    const isMeByTg = myTg != null && (
+      (p.telegramId != null && Number(p.telegramId) === Number(myTg)) ||
+      (p.userId != null && Number(p.userId) === Number(myTg))
+    )
+    const isMeById = myPlayerId && p.id && String(p.id) === String(myPlayerId)
+    if (isMeByTg || isMeById) {
+      setProfileFromGame(true)
+      navigate(SCREENS.PROFILE)
+      return
+    }
+    const username = p.username || p.tg_username
+    if (username) {
+      const tg = window.Telegram?.WebApp
+      const link = `https://t.me/${username}`
+      if (tg?.openTelegramLink) tg.openTelegramLink(link)
+      else window.open(link, '_blank')
+    } else {
+      setViewedPlayer(p)
+    }
+  }, [auth, myPlayerId, navigate])
+
   const createLobby = useCallback(async (names, mode, gameOverride) => {
     if (picker.vibe === 'warmup') setShowWarmupHint(true)
     else setShowWarmupHint(false)
@@ -519,16 +547,25 @@ export default function App() {
       return
     }
 
-    // Local mode (one_phone) — единственный локальный режим, сразу в раунд без LOBBY.
-    // Хосту (i===0) проставляем telegramId, чтобы аватарка подгружалась корректно.
+    // Local mode (one_phone). Хосту (i===0) — все TG-поля: telegramId,
+    // photo_url, username — чтобы аватарка везде была настоящей, а не эмодзи.
+    // У залогиненного пользователя НИКОГДА не должно быть placeholder-эмодзи.
     const tgU = tgUser()
-    const playersList = names.map((name, i) =>
-      createPlayer({
+    const playersList = names.map((name, i) => {
+      if (i === 0 && tgU?.id) {
+        return createPlayer({
+          id: `p0`, name, emoji: EMOJIS[0],
+          ready: true, isHost: true,
+          telegramId: tgU.id, userId: tgU.id,
+          photo_url: tgU.photo_url || null,
+          username: tgU.username || null,
+        })
+      }
+      return createPlayer({
         id: `p${i}`, name, emoji: EMOJIS[i % EMOJIS.length],
         ready: true, isHost: i === 0,
-        telegramId: i === 0 ? (tgU?.id || null) : null,
       })
-    )
+    })
     const newRoom = createRoom(playersList[0], game)
     newRoom.players = playersList
     newRoom.settings = { ...newRoom.settings, mode: 'Один телефон', vibe: picker.vibe }
@@ -846,23 +883,7 @@ export default function App() {
             onRoomPlayersUpdate={(updatedPlayers) => setRoom(r => r ? { ...r, players: updatedPlayers } : r)}
             onGameStartedByHost={() => { startRound() }}
             auth={auth}
-            onPlayerAvatarClick={(p) => {
-              const myTg = auth?.tgUser?.id
-              const isSelf = myTg != null && p?.telegramId != null && Number(p.telegramId) === Number(myTg)
-              if (isSelf) {
-                setProfileFromGame(true)
-                navigate(SCREENS.PROFILE); return
-              }
-              const username = p?.username || p?.tg_username
-              if (username) {
-                const tg = window.Telegram?.WebApp
-                const link = `https://t.me/${username}`
-                if (tg?.openTelegramLink) tg.openTelegramLink(link)
-                else window.open(link, '_blank')
-              } else {
-                setViewedPlayer(p)
-              }
-            }}
+            onPlayerAvatarClick={handlePlayerAvatarClick}
           />}
         {screen === SCREENS.ROUND &&
           <RoundScreen game={selectedGame} round={currentRound}
@@ -882,24 +903,7 @@ export default function App() {
             roomRoundState={roomRoundState}
             onGameEnded={() => { navigate(SCREENS.RESULTS) }}
             auth={auth}
-            onAvatarClick={(p) => {
-              // Свой — открываем свой профиль; чужой с username — TG-чат.
-              const myTg = auth?.tgUser?.id
-              const isSelf = myTg != null && p?.telegramId != null && Number(p.telegramId) === Number(myTg)
-              if (isSelf) {
-                setProfileFromGame(true)
-                navigate(SCREENS.PROFILE); return
-              }
-              const username = p?.username || p?.tg_username
-              if (username) {
-                const tg = window.Telegram?.WebApp
-                const link = `https://t.me/${username}`
-                if (tg?.openTelegramLink) tg.openTelegramLink(link)
-                else window.open(link, '_blank')
-              } else {
-                setViewedPlayer(p)
-              }
-            }}
+            onAvatarClick={handlePlayerAvatarClick}
           />}
         {screen === SCREENS.RESULTS &&
           <ResultsScreen game={selectedGame} players={players}
@@ -1208,8 +1212,7 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
               onClick={onOpenVibePicker}
               aria-label={`Сменить вайб (сейчас: ${vibe.label})`}
             >
-              <span className="bnav-vibe-glow" aria-hidden="true"/>
-              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={22}/></span>
+              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={16}/></span>
               <span className="bnav-vibe-label">{vibe.label}</span>
             </button>
           )
@@ -1670,13 +1673,13 @@ function GamesScreen({ onGame, onEnterLobby }) {
   const simple = GAMES.filter(g => g.simple)
   return (
     <div>
-      <div className="row" style={{marginBottom: 14, alignItems: 'flex-start'}}>
+      <div style={{display: 'flex', gap: 10, marginBottom: 14, alignItems: 'flex-start'}}>
         <div style={{flex: 1, minWidth: 0}}>
           <p className="eyebrow"><Dices size={13}/> Все игры</p>
           <h2 style={{marginBottom: 4}}>Выбирай и играй</h2>
           <p className="lead" style={{margin: 0}}>На одном телефоне или вместе по сети — за пару тапов.</p>
         </div>
-        <button className="btn-secondary" style={{flexShrink: 0, padding: '8px 14px', minHeight: 0}}
+        <button className="btn-secondary no-pulse" style={{flexShrink: 0, width: 'auto', padding: '8px 14px', minHeight: 36, fontSize: 13}}
           onClick={onEnterLobby}>
           <UserPlus size={14}/> Войти в лобби
         </button>
@@ -1897,11 +1900,11 @@ function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
         <div className="friends-card-body">
           <div className="friends-card-title">Войти в комнату</div>
           <div className="friends-card-desc">У друга есть код лобби? Введи его, чтобы присоединиться.</div>
-          <div className="row" style={{marginTop: 12, gap: 8}}>
+          <div style={{display: 'flex', marginTop: 12, gap: 8, alignItems: 'stretch'}}>
             <input
               ref={joinInputRef}
               className="setup-player-input"
-              style={{flex: 1, textTransform: 'uppercase', letterSpacing: '2px', textAlign: 'center', fontSize: 16, fontWeight: 700}}
+              style={{flex: 1, minWidth: 0, textTransform: 'uppercase', letterSpacing: '2px', textAlign: 'center', fontSize: 16, fontWeight: 700}}
               placeholder="A1B2C3"
               value={code}
               onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))}
@@ -1909,7 +1912,7 @@ function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
               maxLength={8}
               autoCapitalize="characters"
             />
-            <button className="btn-primary" style={{flexShrink: 0, padding: '0 16px'}}
+            <button className="btn-primary no-pulse" style={{flexShrink: 0, width: 'auto', padding: '0 18px', minHeight: 44}}
               disabled={!/^[A-Z0-9]{4,8}$/.test(code.trim())}
               onClick={tryJoin}>
               <Play size={15}/> Войти
@@ -2111,19 +2114,25 @@ function GameDetailScreen({ game, onPickMode }) {
         </div>
       </div>
 
-      {/* Выбор режима — две крупные карточки с характером, а не просто кнопки. */}
-      <p className="eyebrow" style={{marginTop: 14, marginBottom: 10}}><Play size={12}/> Как играем</p>
+      {/* Режим игры — две крупные карточки с характером (живые градиенты). */}
+      <p className="eyebrow" style={{marginTop: 14, marginBottom: 10}}><Play size={12}/> Режим игры</p>
       <div className="mode-card-grid">
         <button className="mode-card mode-card-local" onClick={() => onPickMode('one_phone')}>
+          <div className="mode-card-glow" aria-hidden="true"/>
           <div className="mode-card-icon"><Play size={26}/></div>
-          <div className="mode-card-title">Играть на одном телефоне</div>
-          <div className="mode-card-desc">Передаём телефон по кругу</div>
+          <div className="mode-card-text">
+            <div className="mode-card-title">Играть на одном телефоне</div>
+            <div className="mode-card-desc">Передаём телефон по кругу</div>
+          </div>
           <span className="mode-card-arrow"><ChevronRight size={18}/></span>
         </button>
         <button className="mode-card mode-card-mp" onClick={() => onPickMode('multiplayer')}>
+          <div className="mode-card-glow" aria-hidden="true"/>
           <div className="mode-card-icon"><Share2 size={26}/></div>
-          <div className="mode-card-title">Мультиплеер</div>
-          <div className="mode-card-desc">У каждого свой телефон</div>
+          <div className="mode-card-text">
+            <div className="mode-card-title">Мультиплеер</div>
+            <div className="mode-card-desc">У каждого свой телефон</div>
+          </div>
           <span className="mode-card-arrow"><ChevronRight size={18}/></span>
         </button>
       </div>

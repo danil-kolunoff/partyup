@@ -2785,41 +2785,67 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
    START FLOW · v2 (mode cards, vibe in nav, lobby change-game)
 ════════════════════════════════════════════════ */
 .mode-card-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 10px; }
-@media (min-width: 520px) { .mode-card-grid { grid-template-columns: 1fr 1fr; } }
 .mode-card {
-  position: relative; text-align: left; padding: 18px 18px 16px;
-  border-radius: var(--r-lg); background: var(--s2);
-  border: 1px solid var(--border); color: var(--text);
-  cursor: pointer; display: flex; flex-direction: column; gap: 4px;
-  transition: transform var(--fast) var(--spring), box-shadow var(--fast), border-color var(--fast);
+  position: relative; text-align: left; padding: 18px 56px 16px 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid rgba(167,139,250,0.35);
+  color: var(--text);
+  cursor: pointer;
+  display: flex; align-items: center; gap: 14px;
+  transition: transform var(--fast) var(--spring), border-color var(--fast), box-shadow var(--fast);
   overflow: hidden;
+  background: linear-gradient(135deg, rgba(167,139,250,0.18) 0%, rgba(124,58,237,0.22) 100%);
+  box-shadow: 0 6px 20px rgba(124,58,237,0.15);
 }
-.mode-card::before {
-  content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: radial-gradient(120% 80% at 0% 0%, rgba(167,139,250,0.18), transparent 55%);
-  opacity: .8;
+.mode-card-local {
+  border-color: rgba(244,114,182,0.45);
+  background: linear-gradient(135deg, rgba(244,114,182,0.18) 0%, rgba(190,24,93,0.22) 100%);
+  box-shadow: 0 6px 20px rgba(190,24,93,0.18);
 }
-.mode-card-local::before {
-  background: radial-gradient(120% 80% at 0% 0%, rgba(244,114,182,0.22), transparent 55%);
+.mode-card-mp {
+  border-color: rgba(167,139,250,0.50);
+  background: linear-gradient(135deg, rgba(124,58,237,0.20) 0%, rgba(99,102,241,0.26) 100%);
+  box-shadow: 0 6px 20px rgba(99,102,241,0.18);
 }
-.mode-card-mp::before {
-  background: radial-gradient(120% 80% at 100% 0%, rgba(124,58,237,0.28), transparent 60%);
+/* Анимированный «жидкий» blob внутри карточки — даёт ощущение живой подсветки. */
+.mode-card-glow {
+  position: absolute; pointer-events: none; z-index: 0;
+  width: 220px; height: 220px; border-radius: 50%; filter: blur(48px);
+  top: -60px; right: -60px;
+  background: rgba(255,255,255,0.16);
+  animation: mode-card-pulse 5s ease-in-out infinite;
 }
-.mode-card:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 12px 32px rgba(124,58,237,0.18); }
+.mode-card-local .mode-card-glow { background: rgba(244,114,182,0.35); }
+.mode-card-mp    .mode-card-glow { background: rgba(167,139,250,0.40); }
+@keyframes mode-card-pulse {
+  0%, 100% { transform: scale(1) translate(0,0); opacity: 0.7; }
+  50%      { transform: scale(1.15) translate(-10px, 8px); opacity: 1; }
+}
+.mode-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 36px rgba(124,58,237,0.32);
+}
+.mode-card-local:hover { box-shadow: 0 14px 36px rgba(190,24,93,0.32); border-color: #f472b6; }
+.mode-card-mp:hover    { box-shadow: 0 14px 36px rgba(99,102,241,0.34); border-color: #a78bfa; }
 .mode-card:active { transform: scale(0.985); }
 .mode-card-icon {
-  width: 44px; height: 44px; border-radius: 12px;
-  display: grid; place-items: center; margin-bottom: 8px;
-  background: linear-gradient(135deg, rgba(167,139,250,0.18), rgba(124,58,237,0.18));
-  color: var(--accent-2);
+  position: relative; z-index: 1;
+  width: 52px; height: 52px; border-radius: 14px;
+  display: grid; place-items: center; flex-shrink: 0;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.20);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
 }
-.mode-card-title { font-weight: 700; font-size: 16px; }
-.mode-card-desc  { font-size: 13px; color: var(--muted); }
+.mode-card-text { position: relative; z-index: 1; flex: 1; min-width: 0; }
+.mode-card-title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+.mode-card-desc  { font-size: 13px; color: rgba(255,255,255,0.78); margin-top: 2px; }
 .mode-card-arrow {
-  position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
-  color: var(--muted); opacity: .55;
+  position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+  color: rgba(255,255,255,0.65); z-index: 1;
+  transition: transform var(--fast), color var(--fast);
 }
-.mode-card:hover .mode-card-arrow { color: var(--accent-2); opacity: 1; }
+.mode-card:hover .mode-card-arrow { color: #fff; transform: translateY(-50%) translateX(2px); }
 
 /* setup axis row (Vibe link in single-setup / lobby) */
 .setup-axis-card { background: var(--s2); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
@@ -2842,33 +2868,38 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 .lobby-change-game-btn:hover { background: rgba(167,139,250,0.25); }
 .lobby-change-game-btn:active { transform: scale(0.96); }
 
-/* Vibe button in bottom-nav — центральный «акцент» */
+/* Vibe button in bottom-nav — плоская pill-капсула в стиле приложения.
+   Никаких подъёмов и кружочков. Жидкий аврора-градиент, тонкая обводка
+   из accent-цвета, мягкий внутренний glow при hover/press. */
 .bnav-item.is-vibe {
-  position: relative; display: flex; flex-direction: column; align-items: center;
-  gap: 2px; padding: 4px 10px 6px; background: none; border: none; cursor: pointer; color: var(--text);
-  font: inherit; transform: translateY(-10px);
+  position: relative; display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; min-height: 38px; margin: 4px 2px;
+  background: linear-gradient(135deg, rgba(167,139,250,0.16) 0%, rgba(124,58,237,0.20) 100%);
+  border: 1px solid rgba(167,139,250,0.40);
+  border-radius: 999px;
+  color: var(--accent-2); font: inherit; font-weight: 700; font-size: 12px;
+  cursor: pointer; overflow: hidden;
+  transition: background var(--fast), border-color var(--fast), transform var(--fast) var(--spring), box-shadow var(--fast);
 }
-.bnav-vibe-glow {
-  position: absolute; top: -2px; left: 50%; transform: translateX(-50%);
-  width: 56px; height: 56px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(167,139,250,0.55) 0%, transparent 65%);
-  filter: blur(4px); pointer-events: none; z-index: 0;
-  animation: pulse-glow 3s ease-in-out infinite;
+/* Sheen — медленно проезжающий блик. Делает кнопку «живой» без раздражающего
+   мигания. */
+.bnav-item.is-vibe::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.18) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: vibe-sheen 5.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
-.bnav-vibe-icon {
-  position: relative; z-index: 1;
-  width: 46px; height: 46px; border-radius: 50%;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--accent) 0%, #7c3aed 100%);
-  color: #fff; box-shadow: 0 8px 22px rgba(124,58,237,0.55);
-  transition: transform var(--fast) var(--spring);
+.bnav-item.is-vibe:hover {
+  background: linear-gradient(135deg, rgba(167,139,250,0.24) 0%, rgba(124,58,237,0.32) 100%);
+  border-color: rgba(167,139,250,0.65);
+  box-shadow: 0 4px 14px rgba(124,58,237,0.30);
 }
-.bnav-item.is-vibe:hover .bnav-vibe-icon { transform: scale(1.06); }
-.bnav-item.is-vibe:active .bnav-vibe-icon { transform: scale(0.94); }
-.bnav-vibe-label { font-size: 10px; font-weight: 700; color: var(--accent-2); letter-spacing: 0.02em; position: relative; z-index: 1; }
-@keyframes pulse-glow {
-  0%, 100% { opacity: 0.7; transform: translateX(-50%) scale(1); }
-  50%      { opacity: 1;   transform: translateX(-50%) scale(1.08); }
+.bnav-item.is-vibe:active { transform: scale(0.97); }
+.bnav-vibe-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--accent-2); }
+.bnav-vibe-label { letter-spacing: 0.02em; white-space: nowrap; }
+@keyframes vibe-sheen {
+  0%, 70%  { transform: translateX(-120%); }
+  100%     { transform: translateX(120%); }
 }
 
 /* Vibe / Game picker modal grid */
