@@ -2523,35 +2523,45 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 }
 .vibe-burst-em {
   position: absolute;
-  opacity: 0; line-height: 1;
+  line-height: 1;
   margin-left: -0.5em; margin-top: -0.5em;
-  filter: drop-shadow(0 8px 18px rgba(0,0,0,0.55));
-  will-change: transform, opacity;
   user-select: none;
-  /* 2.2 c — взлёт «петардой» (быстро) + лёгкое опадание (медленно).
-     Используем кастомный бизье для естественной траектории. */
-  animation: burstFlyFall 2.2s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
-  transform: translate3d(0, 0, 0) rotate(0) scale(0);
+  pointer-events: none;
+  /* GPU-композитинг — transform/opacity апдейтятся каждый кадр из JS,
+     никаких CSS-анимаций (они и давали «дёрганость» на calc-keyframes). */
+  transform: translate3d(0, 0, 0);
+  /* Глубинная тень: разная для слоёв (parallax-эффект). */
 }
-@keyframes burstFlyFall {
-  /* старт: маленький, прозрачный, в origin */
-  0%   { opacity: 0;    transform: translate3d(0, 0, 0) rotate(0deg) scale(0.2); }
-  /* лёгкий «выстрел» — мгновенный масштаб и видимость */
-  10%  { opacity: 1;    transform: translate3d(calc(var(--peak-x) * 0.30), calc(var(--peak-y) * 0.30), 0)
-                                    rotate(calc(var(--rot-peak) * 0.25)) scale(calc(var(--scl) * 1.10)); }
-  /* пик взлёта — apex; масштаб чуть больше, opacity 100% */
-  35%  { opacity: 1;    transform: translate3d(var(--peak-x), var(--peak-y), 0)
-                                    rotate(var(--rot-peak)) scale(var(--scl)); }
-  /* начало опадания — лёгкий дрейф вбок, ещё видны */
-  60%  { opacity: 0.9;  transform: translate3d(calc(var(--peak-x) + (var(--land-x) - var(--peak-x)) * 0.4),
-                                                 calc(var(--peak-y) + (var(--land-y) - var(--peak-y)) * 0.4), 0)
-                                    rotate(calc(var(--rot-peak) + (var(--rot-land) - var(--rot-peak)) * 0.5))
-                                    scale(calc(var(--scl) * 0.92)); }
-  /* почти приземлились, начинаем таять */
-  85%  { opacity: 0.4;  transform: translate3d(calc(var(--land-x) * 0.92), calc(var(--land-y) * 0.92), 0)
-                                    rotate(calc(var(--rot-land) * 0.92)) scale(calc(var(--scl) * 0.78)); }
-  100% { opacity: 0;    transform: translate3d(var(--land-x), var(--land-y), 0)
-                                    rotate(var(--rot-land)) scale(calc(var(--scl) * 0.65)); }
+.vibe-burst-em.layer-front {
+  filter: drop-shadow(0 10px 22px rgba(0,0,0,0.55));
+  z-index: 3;
+}
+.vibe-burst-em.layer-mid {
+  filter: drop-shadow(0 6px 14px rgba(0,0,0,0.45));
+  z-index: 2;
+}
+.vibe-burst-em.layer-back {
+  filter: drop-shadow(0 3px 8px rgba(0,0,0,0.35));
+  z-index: 1;
+  opacity: 0.85;
+}
+
+/* «Premium pulse» на самой кнопке-источнике в момент выстрела —
+   делает действие осязаемым: тап → отклик. */
+.bnav-item.is-vibe.is-bursting .bnav-vibe-icon {
+  animation: vibe-btn-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.bnav-item.is-vibe.is-bursting .bnav-vibe-icon::before {
+  animation: vibe-btn-ring 0.6s ease-out forwards;
+}
+@keyframes vibe-btn-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+@keyframes vibe-btn-ring {
+  0%   { opacity: 0.9; transform: scale(1); }
+  100% { opacity: 0;   transform: scale(2.4); }
 }
 .vibe-burst[data-vibe="adult"] .vibe-burst-em,
 .vibe-burst[data-vibe="ultra_adult"] .vibe-burst-em,

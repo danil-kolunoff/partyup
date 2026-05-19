@@ -1179,80 +1179,148 @@ const VIBE_AMBIENT_EMOJI = {
   adult:       ['🔞','💋','😈','🍑','🍆','🥵','🔥','🍷'],
   ultra_adult: ['💋','🥵','😈','🔞','🍑','🍆','💦','🩷'],
 }
+// JS-driven particle burst: гонится rAF, физика (импульс + гравитация +
+// сопротивление). Это даёт по-настоящему плавную траекторию (CSS keyframes
+// с calc'ами интерполируются неравномерно — отсюда «дёрганость»).
+//
+// Эффект «премиальный»: 3 уровня глубины (background → mid → foreground)
+// с разными размерами и speed-множителями = parallax. Сначала яркая
+// вспышка от центра (button pulse + scale-pop частиц), потом плавный
+// взлёт «фейерверком» и медленное опадание/таяние.
 function VibeBurst({ vibe, burst }) {
-  // burst: { id, x, y } — где x/y координаты центра кликнутой кнопки (или null).
-  const [active, setActive] = useState(false)
   const burstId = burst?.id || 0
+  const rootRef = useRef(null)
+  const rafRef = useRef(0)
+  const particlesRef = useRef([])
+
   useEffect(() => {
-    if (!burstId || !vibe || vibe === 'warmup' || !VIBE_AMBIENT_EMOJI[vibe]) {
-      setActive(false)
-      return
-    }
-    setActive(true)
-    // 2.2 c — взлёт + опадание. Длиннее, чем чистый разлёт, но не мешает тапу
-    // (pointer-events:none и opacity тает сразу после пика).
-    const t = setTimeout(() => setActive(false), 2200)
-    return () => clearTimeout(t)
-  }, [burstId, vibe])
-
-  // 14 эмодзи: «петарда» — взлетают вверх веером, потом опадают листопадом.
-  // Каждой эмодзи задаём peak-position (через 0.4-0.55 c) и land-position
-  // (через 1.6-2.0 c). CSS-keyframes управляют дугой: подъём + горизонтальный
-  // дрейф + вращение + scale-пульс.
-  const items = useMemo(() => {
+    if (!burstId || !vibe || vibe === 'warmup' || !VIBE_AMBIENT_EMOJI[vibe]) return
     const set = VIBE_AMBIENT_EMOJI[vibe] || []
-    if (!set.length) return []
-    return Array.from({ length: 14 }, (_, i) => {
-      const seed = (burstId * 9301 + i * 49297) % 233280
-      const rnd = (n) => ((seed * (i + 1) + n * 6151) % 1000) / 1000
-      // baseAngle: веер вверх (от -110° до -70°, ±20° = sin-cos = up-ish)
-      const spread = Math.PI * 0.85 // ~150°
-      const baseAngle = -Math.PI / 2 - spread / 2 + (i / 13) * spread
-      const jitter = (rnd(1) - 0.5) * 0.25
-      const angle = baseAngle + jitter
-      // дальность взлёта
-      const flyDist = 150 + rnd(2) * 180 // 150-330px
-      const peakX = Math.cos(angle) * flyDist
-      const peakY = Math.sin(angle) * flyDist
-      // горизонтальный дрейф при опадании (как листья)
-      const driftX = peakX + (rnd(3) - 0.5) * 80
-      // опадание ниже пика на полтора экрана
-      const landY = peakY + 280 + rnd(4) * 180
-      return {
-        e: set[Math.floor(rnd(5) * set.length)],
-        size: 26 + Math.floor(rnd(6) * 32),  // 26-58px
-        rotPeak: (rnd(7) - 0.5) * 360,        // -180..180 deg
-        rotLand: (rnd(8) - 0.5) * 720,        // больше оборотов при опадании
-        delay: rnd(9) * 0.12,                  // 0-0.12s стартовый разнобой
-        peakX, peakY, driftX, landY,
-        scale: 0.95 + rnd(0) * 0.35,
-      }
-    })
-  }, [burstId, vibe])
+    if (!set.length) return
+    const root = rootRef.current
+    if (!root) return
 
-  if (!active || !items.length) return null
-  // origin: если координаты кнопки есть — используем их; иначе центр экрана.
-  const originX = (burst?.x != null) ? burst.x : (typeof window !== 'undefined' ? window.innerWidth / 2 : 200)
-  const originY = (burst?.y != null) ? burst.y : (typeof window !== 'undefined' ? window.innerHeight / 2 : 300)
-  return (
-    <div className="vibe-burst" data-vibe={vibe} aria-hidden="true" key={burstId}>
-      {items.map((it, i) => (
-        <span key={i} className="vibe-burst-em" style={{
-          left: `${originX}px`,
-          top: `${originY}px`,
-          fontSize: `${it.size}px`,
-          '--peak-x':  `${it.peakX}px`,
-          '--peak-y':  `${it.peakY}px`,
-          '--land-x':  `${it.driftX}px`,
-          '--land-y':  `${it.landY}px`,
-          '--rot-peak': `${it.rotPeak}deg`,
-          '--rot-land': `${it.rotLand}deg`,
-          '--scl': it.scale,
-          animationDelay: `${it.delay}s`,
-        }}>{it.e}</span>
-      ))}
-    </div>
-  )
+    const originX = (burst?.x != null) ? burst.x : window.innerWidth / 2
+    const originY = (burst?.y != null) ? burst.y : window.innerHeight / 2
+
+    // Кнопка-источник: коротко пульсирует, подтверждая тап (премиум-feedback).
+    const btn = document.querySelector('.bnav-item.is-vibe')
+    if (btn) {
+      btn.classList.add('is-bursting')
+      setTimeout(() => btn.classList.remove('is-bursting'), 600)
+    }
+
+    // 22 частицы: 3 «слоя» глубины — front (большие, быстрые) /
+    // mid (средние) / back (мелкие, медленные). Parallax даёт ощущение
+    // объёма, а не плоский фейерверк.
+    const N = 22
+    const particles = []
+    for (let i = 0; i < N; i++) {
+      const layer = i < 6 ? 'front' : i < 14 ? 'mid' : 'back'
+      const sizeBase = layer === 'front' ? 42 : layer === 'mid' ? 30 : 22
+      const sizeJit = layer === 'front' ? 12 : layer === 'mid' ? 8 : 6
+      const speedMul = layer === 'front' ? 1.0 : layer === 'mid' ? 0.85 : 0.7
+      // Угол выстрела: веер вверх ±70°, без точек строго вверх (там толпится)
+      const t = i / (N - 1)
+      const angle = -Math.PI / 2 + (t - 0.5) * (Math.PI * 0.95) + (Math.random() - 0.5) * 0.18
+      const speed = (10 + Math.random() * 6) * speedMul
+      const size = sizeBase + Math.floor(Math.random() * sizeJit)
+      particles.push({
+        x: 0, y: 0,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        rot: (Math.random() - 0.5) * 30,
+        vrot: (Math.random() - 0.5) * 6, // °/frame
+        size,
+        emoji: set[Math.floor(Math.random() * set.length)],
+        layer,
+        life: 0,
+        maxLife: 110 + Math.floor(Math.random() * 50), // 110-160 frames ≈ 1.8-2.7s
+        // pop-scale animation in first 8 frames
+        scale: 0,
+        targetScale: 0.9 + Math.random() * 0.35,
+        // delay чтобы частицы не вылетали залпом — лёгкий разнобой
+        delay: Math.floor(Math.random() * 5),
+      })
+    }
+    particlesRef.current = particles
+
+    // Создаём DOM-ноды один раз, далее только обновляем transform/opacity.
+    root.innerHTML = ''
+    const nodes = particles.map(p => {
+      const el = document.createElement('span')
+      el.className = `vibe-burst-em layer-${p.layer}`
+      el.style.left = `${originX}px`
+      el.style.top = `${originY}px`
+      el.style.fontSize = `${p.size}px`
+      el.style.opacity = '0'
+      el.style.willChange = 'transform, opacity'
+      el.textContent = p.emoji
+      root.appendChild(el)
+      return el
+    })
+
+    // Физика
+    const GRAVITY = 0.42        // px/frame²
+    const DRAG_X = 0.985        // воздух гасит горизонтальную скорость
+    const DRAG_Y_UP = 0.992     // вверху воздух почти не сопротивляется
+    const FADE_IN = 6           // frames для появления
+    const FADE_OUT_FROM = 0.6   // с какой доли life начинаем таять
+    const startTime = performance.now()
+    const maxLife = 170 // глобальный потолок
+
+    function step() {
+      let alive = 0
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i]
+        if (p.life < 0) { p.life++; continue } // ждём delay
+        p.life++
+        if (p.delay > 0 && p.life < p.delay) continue
+        // scale pop-in
+        if (p.scale < p.targetScale) p.scale = Math.min(p.targetScale, p.scale + p.targetScale * 0.18)
+
+        // velocity update
+        p.vx *= DRAG_X
+        p.vy = p.vy * (p.vy < 0 ? DRAG_Y_UP : 0.995) + GRAVITY
+        p.x += p.vx
+        p.y += p.vy
+        p.rot += p.vrot
+        p.vrot *= 0.97 // вращение постепенно замедляется
+
+        // opacity
+        let opacity = 1
+        if (p.life < FADE_IN) opacity = p.life / FADE_IN
+        const lifeT = p.life / p.maxLife
+        if (lifeT > FADE_OUT_FROM) {
+          opacity *= 1 - (lifeT - FADE_OUT_FROM) / (1 - FADE_OUT_FROM)
+        }
+        if (p.life < p.maxLife) alive++
+
+        // apply
+        const node = nodes[i]
+        if (node) {
+          node.style.transform = `translate3d(${p.x}px, ${p.y}px, 0) rotate(${p.rot}deg) scale(${p.scale})`
+          node.style.opacity = String(Math.max(0, Math.min(1, opacity)))
+        }
+      }
+      const elapsed = performance.now() - startTime
+      if (alive > 0 && elapsed < maxLife * 16.7) {
+        rafRef.current = requestAnimationFrame(step)
+      } else {
+        // cleanup
+        nodes.forEach(n => n.remove())
+        particlesRef.current = []
+      }
+    }
+    rafRef.current = requestAnimationFrame(step)
+
+    return () => {
+      cancelAnimationFrame(rafRef.current)
+      if (rootRef.current) rootRef.current.innerHTML = ''
+    }
+  }, [burstId, vibe, burst?.x, burst?.y])
+
+  return <div className="vibe-burst" data-vibe={vibe} aria-hidden="true" ref={rootRef}/>
 }
 
 /* ─── BottomNav — фикс-меню снизу ────────────────────────────────────────── */
