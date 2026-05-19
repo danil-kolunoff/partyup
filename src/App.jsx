@@ -1201,15 +1201,18 @@ function CardCountSelector({ game, settings, setSettings, style }) {
 }
 
 /* ─── VibeBurst — наборы эмодзи под каждый вайб ─────────────────────────── */
+// По 5 максимально характерных эмодзи на вайб — burst выбирает случайные.
+// Меньше шума, узнаваемее «лицо» каждого вайба.
 const VIBE_AMBIENT_EMOJI = {
-  funny:        ['😂','🤣','🤡','😅','🤪','😆','🎭','💀'],
-  family:       ['🏠','🧸','🍪','🎂','🌞','🐕','🎈','🌳','👨‍👩‍👧','🍎'],
-  new_people:   ['🤝','👋','💬','🪩','🎉','✨','🥂','🫂'],
-  deep:         ['❤️','💞','🫀','🪞','💭','🕯️','🌌','🤲'],
-  teambuilding: ['💼','🤝','💡','🚀','🎯','📊','☕','🏆','🧩','⚡'],
-  cringe:       ['🤡','😬','🫣','💀','🙈','😳','🥴','📵','🫠','😵‍💫'],
-  adult:        ['🔞','💋','😈','🍑','🍆','🥵','🔥','🍷'],
-  ultra_adult:  ['💋','🥵','😈','🔞','🍑','🍆','💦','🩷'],
+  warmup:       ['✨','🎉','🪩','🌟','🥳'],
+  funny:        ['😂','🤣','🤡','😅','🎭'],
+  family:       ['🏠','🧸','🎂','🐕','🎈'],
+  new_people:   ['🤝','👋','🥂','🪩','✨'],
+  deep:         ['❤️','💞','💭','🌌','🤲'],
+  teambuilding: ['💼','🚀','🏆','💡','🎯'],
+  cringe:       ['🤡','😬','🫣','💀','🫠'],
+  adult:        ['🔥','💋','😈','🌶️','🍷'],
+  ultra_adult:  ['💋','🥵','💦','😈','🩷'],
 }
 // JS-driven particle burst: гонится rAF, физика (импульс + гравитация +
 // сопротивление). Это даёт по-настоящему плавную траекторию (CSS keyframes
@@ -1226,7 +1229,7 @@ function VibeBurst({ vibe, burst }) {
   const particlesRef = useRef([])
 
   useEffect(() => {
-    if (!burstId || !vibe || vibe === 'warmup' || !VIBE_AMBIENT_EMOJI[vibe]) return
+    if (!burstId || !vibe || !VIBE_AMBIENT_EMOJI[vibe]) return
     const set = VIBE_AMBIENT_EMOJI[vibe] || []
     if (!set.length) return
     const root = rootRef.current
