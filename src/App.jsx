@@ -6023,6 +6023,151 @@ function TitlesBoard({ players, game }) {
   )
 }
 
+/* ─── RatingList ────────────────────────────────────────────────────────
+   Единый рейтинг 2-5 место на экране результатов. 1-е выводится в большой
+   winner-card выше; здесь — последовательный список с per-place ачивками,
+   очками и подписями. Источник «очков» меняется от игры: для truth/alias/
+   crocodile/whoami/would_rather — это `scores`; для whoofus/never/five/
+   associations берётся per-game stats из localStorage. */
+const GAME_PLACE_TITLES = {
+  // Каждый массив — 5 ачивок (1-е, 2-е, 3-е, 4-е, 5-е место).
+  truth: [
+    { medal: '🏆', title: 'Самый смелый', sub: 'Принял все вызовы вечера' },
+    { medal: '🥈', title: 'Открытый',     sub: 'Без боязни признаний' },
+    { medal: '🥉', title: 'Готов на всё', sub: 'Не отступал перед заданиями' },
+    { medal: '🎯', title: 'Достойный собеседник', sub: 'Хорошо включился' },
+    { medal: '✨', title: 'В игре',       sub: 'Часть весёлого вечера' },
+  ],
+  never: [
+    { medal: '🏆', title: 'Многое повидал', sub: 'Больше всех нажимал «Было»' },
+    { medal: '🥈', title: 'Заводила вечера', sub: 'Второе место по опыту' },
+    { medal: '🥉', title: 'Бывалый',      sub: 'Опыт богатый' },
+    { medal: '🎯', title: 'Знает жизнь',  sub: 'Достойный список приключений' },
+    { medal: '✨', title: 'Был в теме',    sub: 'Часть огонька вечера' },
+  ],
+  whoofus: [
+    { medal: '🏆', title: 'Звезда компании', sub: 'Большинство выбирало именно тебя' },
+    { medal: '🥈', title: 'Душа компании', sub: 'Тебя замечают' },
+    { medal: '🥉', title: 'Главное лицо', sub: 'В центре внимания' },
+    { medal: '🎯', title: 'Заметный игрок', sub: 'Тебя помнят' },
+    { medal: '✨', title: 'В кадре',       sub: 'Свой среди своих' },
+  ],
+  five: [
+    { medal: '🏆', title: 'Молниеносный', sub: 'Без пауз и запинок' },
+    { medal: '🥈', title: 'Чёткий ход',   sub: 'Почти не давал сбоев' },
+    { medal: '🥉', title: 'Сообразительный', sub: 'Достойный темп' },
+    { medal: '🎯', title: 'Стабильный',   sub: 'Уверенный результат' },
+    { medal: '✨', title: 'В пятёрке',    sub: 'Не подвёл компанию' },
+  ],
+  associations: [
+    { medal: '🏆', title: 'Думает как все', sub: 'Идеальное чувство компании' },
+    { medal: '🥈', title: 'На общей волне', sub: 'Часто попадает в группу' },
+    { medal: '🥉', title: 'Хорошо чувствует', sub: 'Совпадения не редкость' },
+    { medal: '🎯', title: 'В команде',    sub: 'Свой ход мысли' },
+    { medal: '✨', title: 'Часть потока', sub: 'Был на одной волне' },
+  ],
+  would_rather: [
+    { medal: '🏆', title: 'Решительный',  sub: 'Выбирает уверенно' },
+    { medal: '🥈', title: 'Без сомнений', sub: 'Знает, что хочет' },
+    { medal: '🥉', title: 'Уверенный выбор', sub: 'Хорошие инстинкты' },
+    { medal: '🎯', title: 'Свой вкус',    sub: 'Не идёт на поводу' },
+    { medal: '✨', title: 'В игре',       sub: 'Часть жарких споров' },
+  ],
+  crocodile: [
+    { medal: '🏆', title: 'Мастер пантомимы', sub: 'Слова угадываются мгновенно' },
+    { medal: '🥈', title: 'Артистичный',   sub: 'Без слов всё понятно' },
+    { medal: '🥉', title: 'Понятный',     sub: 'Жесты говорят сами' },
+    { medal: '🎯', title: 'Старательный', sub: 'Не сдавался до конца' },
+    { medal: '✨', title: 'В роли',        sub: 'Часть весёлого шоу' },
+  ],
+  alias: [
+    { medal: '🏆', title: 'Король объяснений', sub: 'Слова летят как из автомата' },
+    { medal: '🥈', title: 'Чёткий рассказчик', sub: 'Понятно и быстро' },
+    { medal: '🥉', title: 'Хороший спикер', sub: 'Объяснил много' },
+    { medal: '🎯', title: 'Понятный',     sub: 'Команда угадывала' },
+    { medal: '✨', title: 'В команде',     sub: 'Внёс свой вклад' },
+  ],
+  whoami: [
+    { medal: '🏆', title: 'Острый ум',    sub: 'Угадал быстрее всех' },
+    { medal: '🥈', title: 'Умный сыщик',  sub: 'Грамотные вопросы' },
+    { medal: '🥉', title: 'Догадливый',   sub: 'Хорошая интуиция' },
+    { medal: '🎯', title: 'Любознательный', sub: 'Задавал много вопросов' },
+    { medal: '✨', title: 'В деле',        sub: 'Не сдавался' },
+  ],
+}
+const DEFAULT_PLACE_TITLES = [
+  { medal: '🏆', title: 'Победитель',  sub: 'Главный герой вечера' },
+  { medal: '🥈', title: 'Второе место', sub: 'Совсем рядом с первым' },
+  { medal: '🥉', title: 'Третье место', sub: 'Достойный результат' },
+  { medal: '🎯', title: 'В четвёрке',   sub: 'Хороший игрок' },
+  { medal: '✨', title: 'В пятёрке',    sub: 'Часть компании' },
+]
+
+// Возвращает { value, unit } для каждой игры на основе нужного источника очков.
+function computeGameRanking(players, scores, game) {
+  const id = game?.id
+  // Загружаем per-game stats для тех игр, где балл — не из scores.
+  const loadStats = (key) => {
+    try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
+  }
+  let rows = []
+  let unit = 'оч.'
+  if (id === 'whoofus') {
+    const s = loadStats('pu_whoofus_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
+    unit = (n) => `${n} голос${n === 1 ? '' : n < 5 ? 'а' : 'ов'}`
+  } else if (id === 'never') {
+    const s = loadStats('pu_never_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.yes || 0) }))
+    unit = (n) => `${n} призн.`
+  } else if (id === 'five') {
+    const s = loadStats('pu_five_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.success || 0), tieBreak: -Number(s[p.id]?.fail || 0) }))
+    unit = (n) => `${n} удач`
+  } else if (id === 'associations') {
+    const s = loadStats('pu_assoc_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
+    unit = (n) => `${n} совп.`
+  } else {
+    rows = players.map(p => ({ ...p, value: Number(scores?.[p.id] || 0) }))
+    unit = (n) => `${n} оч.`
+  }
+  rows.sort((a, b) => (b.value - a.value) || ((b.tieBreak||0) - (a.tieBreak||0)))
+  return { rows, unit }
+}
+
+function RatingList({ players, scores, game, winnerId }) {
+  const { rows, unit } = computeGameRanking(players, scores, game)
+  // Кандидаты на места 2-5: всё после winnerId, фильтр value>0 опционален.
+  const rest = rows.filter(r => String(r.id) !== String(winnerId)).slice(0, 4)
+  if (!rest.length) return null
+  const titles = GAME_PLACE_TITLES[game?.id] || DEFAULT_PLACE_TITLES
+  const unitStr = (n) => typeof unit === 'function' ? unit(n) : `${n} ${unit}`
+  return (
+    <div className="rating-list" style={{marginTop: 16}}>
+      <div className="rating-list-title">🏅 Рейтинг участников</div>
+      <div className="rating-list-items">
+        {rest.map((p, i) => {
+          const place = i + 2 // начинаем со 2-го места
+          const t = titles[place - 1] || titles[titles.length - 1]
+          return (
+            <div key={p.id} className={`rating-card rating-card-p${place}`}>
+              <div className="rating-card-medal">{t.medal}<span className="rating-card-place">{place}</span></div>
+              <PlayerAvatar player={p} auth={null} myId={null} size={48} className="rating-card-avatar"/>
+              <div className="rating-card-body">
+                <div className="rating-card-name">{p.name}</div>
+                <div className="rating-card-title">{t.title}</div>
+                <div className="rating-card-sub">{t.sub}</div>
+              </div>
+              <div className="rating-card-score">{unitStr(p.value)}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated, myId }) {
   // Гости в мультиплеере поллят комнату медленно (3 c, с visibility-gate):
   // как только хост поменяет state на 'lobby' или 'playing' — навигатор
@@ -6087,19 +6232,12 @@ const podiumMedals = ['🏆', '🥈', '🥉']
     would_rather: { title: 'Решительный', sub: 'Выбирает уверенно' },
   }
   const tagline = GAME_WINNER_TAGLINE[game.id] || { title: 'Главный герой вечера', sub: game.title }
-  // Для «Кто из нас» победитель определяется не по recordRoundScore, а по
-  // накопленному числу полученных голосов (pu_whoofus_stats). Подменяем.
-  let winner = ranked[0]
-  let whoofusVotes = 0
-  if (game.id === 'whoofus') {
-    let stats = {}
-    try { stats = JSON.parse(localStorage.getItem('pu_whoofus_stats') || '{}') } catch {}
-    const sorted = [...players].sort((a, b) => (Number(stats[b.id] || 0) - Number(stats[a.id] || 0)))
-    if (sorted[0] && Number(stats[sorted[0].id] || 0) > 0) {
-      winner = sorted[0]
-      whoofusVotes = Number(stats[sorted[0].id] || 0)
-    }
-  }
+  // Универсальный winner через computeGameRanking — корректно работает и для
+  // игр без recordRoundScore (whoofus, never) через per-game stats из localStorage.
+  const { rows: winnerRanked, unit: winnerUnit } = computeGameRanking(players, scores, game)
+  const winner = winnerRanked[0] && winnerRanked[0].value > 0 ? winnerRanked[0] : ranked[0]
+  const winnerValue = winner ? Number(winnerRanked.find(r => r.id === winner.id)?.value || 0) : 0
+  const winnerUnitStr = typeof winnerUnit === 'function' ? winnerUnit(winnerValue) : `${winnerValue} ${winnerUnit}`
 
   return (
     <div className="results-v2">
@@ -6124,16 +6262,10 @@ const podiumMedals = ['🏆', '🥈', '🥉']
             </div>
             <div className="winner-card-name">{winner.name}</div>
             <div className="winner-card-tagline">{tagline.sub}</div>
-            {hasScores && game.id !== 'whoofus' && (
+            {winnerValue > 0 && (
               <div className="winner-card-score">
-                <span className="winner-card-score-n">{scores[winner.id] || 0}</span>
-                <span className="winner-card-score-l">очков</span>
-              </div>
-            )}
-            {game.id === 'whoofus' && whoofusVotes > 0 && (
-              <div className="winner-card-score">
-                <span className="winner-card-score-n">{whoofusVotes}</span>
-                <span className="winner-card-score-l">голос{whoofusVotes === 1 ? '' : whoofusVotes < 5 ? 'а' : 'ов'}</span>
+                <span className="winner-card-score-n">{winnerValue}</span>
+                <span className="winner-card-score-l">{winnerUnitStr.replace(String(winnerValue) + ' ', '')}</span>
               </div>
             )}
           </div>
@@ -6177,168 +6309,16 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         )
       })()}
 
-      {/* Whoofus — кто получил больше всего голосов (узнаваемость) */}
-      {game.id === 'whoofus' && (() => {
-        let stats = {}
-        try { stats = JSON.parse(localStorage.getItem('pu_whoofus_stats') || '{}') } catch {}
-        const rows = players.map(p => ({
-          ...p, votes: Number(stats[p.id] || 0),
-        })).filter(r => r.votes > 0).sort((a, b) => b.votes - a.votes)
-        if (!rows.length) return null
-        const max = rows[0].votes
-        return (
-          <div className="never-stats-card">
-            <div className="never-stats-title">👥 Кто выделился</div>
-            <div className="never-stats-list">
-              {rows.map((r, i) => {
-                const pct = max ? Math.round((r.votes / max) * 100) : 0
-                const medal = i === 0 ? '🏆' : i === 1 ? '🥈' : i === 2 ? '🥉' : null
-                return (
-                  <div key={r.id} className="never-stats-row">
-                    <PlayerAvatar player={r} auth={null} myId={null} size={36} className="never-stats-avatar"/>
-                    <div className="never-stats-info">
-                      <div className="never-stats-name">{medal ? medal + ' ' : ''}{r.name}</div>
-                      <div className="never-stats-bar"><div className="never-stats-fill" style={{width: pct + '%'}}/></div>
-                    </div>
-                    <div className="never-stats-counts">
-                      <span title="Голосов">{r.votes} голос{r.votes === 1 ? '' : r.votes < 5 ? 'а' : 'ов'}</span>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
+      {/* Whoofus / Five / Associations — единый RatingList ниже уже выводит
+          места 2-5 с per-game ачивками. Отдельные стат-карточки удалены
+          чтобы не дублировать. Для «Я никогда не» сохраняется отдельная
+          карточка «🙋 Кто что делал» — она показывает балансы Было/Не было,
+          это другая размерность данных. */}
 
-      {/* 5 секунд — успех/провал на ход */}
-      {game.id === 'five' && (() => {
-        let stats = {}
-        try { stats = JSON.parse(localStorage.getItem('pu_five_stats') || '{}') } catch {}
-        const rows = players.map(p => ({
-          ...p,
-          success: Number(stats[p.id]?.success || 0),
-          fail:    Number(stats[p.id]?.fail    || 0),
-        })).filter(r => r.success + r.fail > 0)
-        if (!rows.length) return null
-        // Сортировка: успешные раунды desc, затем меньше провалов выше.
-        rows.sort((a, b) => (b.success - a.success) || (a.fail - b.fail))
-        const top5 = rows.slice(0, 5)
-        // Per-place ачивки (название + подпись). Топ-3 крупно, 4-5 проще.
-        const PLACE_TITLES = [
-          { medal: '🏆', title: 'Молниеносный', sub: 'Без пауз и запинок' },
-          { medal: '🥈', title: 'Чёткий ход',   sub: 'Почти не давал сбоев' },
-          { medal: '🥉', title: 'Сообразительный', sub: 'Достойный темп' },
-          { medal: '🎯', title: 'Стабильный',   sub: 'Уверенный результат' },
-          { medal: '✨', title: 'Участник топа', sub: 'В пятёрке быстрых' },
-        ]
-        const maxSuccess = top5[0].success || 1
-        return (
-          <div className="never-stats-card">
-            <div className="never-stats-title">⏱ Топ-5 быстрых умов</div>
-            <div className="never-stats-list">
-              {top5.map((r, i) => {
-                const total = r.success + r.fail
-                const pct = total ? Math.round((r.success / maxSuccess) * 100) : 0
-                const t = PLACE_TITLES[i] || PLACE_TITLES[4]
-                return (
-                  <div key={r.id} className="never-stats-row five-place-row">
-                    <PlayerAvatar player={r} auth={null} myId={null} size={40} className="never-stats-avatar"/>
-                    <div className="never-stats-info">
-                      <div className="never-stats-name">
-                        <span className="five-place-medal">{t.medal}</span>
-                        <span className="five-place-title">{t.title}</span>
-                        <span className="five-place-divider">·</span>
-                        <span className="five-place-pname">{r.name}</span>
-                      </div>
-                      <div className="five-place-sub">{t.sub}</div>
-                      <div className="never-stats-bar"><div className="never-stats-fill" style={{width: pct + '%'}}/></div>
-                    </div>
-                    <div className="never-stats-counts">
-                      <span title="Успешно">✅ {r.success}</span>
-                      {r.fail > 0 && <span title="Не успел" style={{opacity:0.55}}>❌ {r.fail}</span>}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
-
-      {/* Ассоциации — кто чаще всего попадал в «общую волну» */}
-      {game.id === 'associations' && (() => {
-        let stats = {}
-        try { stats = JSON.parse(localStorage.getItem('pu_assoc_stats') || '{}') } catch {}
-        const rows = players.map(p => ({
-          ...p, matches: Number(stats[p.id] || 0),
-        })).filter(r => r.matches > 0).sort((a, b) => b.matches - a.matches)
-        if (!rows.length) return null
-        const max = rows[0].matches
-        return (
-          <div className="never-stats-card">
-            <div className="never-stats-title">🧠 Думают одинаково</div>
-            <div className="never-stats-list">
-              {rows.map((r, i) => {
-                const pct = max ? Math.round((r.matches / max) * 100) : 0
-                const medal = i === 0 ? '🏆' : i === 1 ? '🥈' : i === 2 ? '🥉' : null
-                return (
-                  <div key={r.id} className="never-stats-row">
-                    <PlayerAvatar player={r} auth={null} myId={null} size={36} className="never-stats-avatar"/>
-                    <div className="never-stats-info">
-                      <div className="never-stats-name">{medal ? medal + ' ' : ''}{r.name}</div>
-                      <div className="never-stats-bar"><div className="never-stats-fill" style={{width: pct + '%'}}/></div>
-                    </div>
-                    <div className="never-stats-counts">
-                      <span title="Совпадений">🎯 {r.matches}</span>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
-
-      {/* Подиум 2-3 место в виде компактных «социальных» аватарок */}
-      {ranked.length > 1 && hasScores && (
-        <div className="podium-row">
-          {[1, 2].map(idx => {
-            const p = ranked[idx]; if (!p) return null
-            return (
-              <div key={p.id} className={`podium-card podium-${idx + 1}`}>
-                <div className="podium-medal">{podiumMedals[idx]}</div>
-                <PlayerAvatar player={p} auth={null} myId={null} size={56} className="podium-avatar"/>
-                <div className="podium-name">{p.name}</div>
-                <div className="podium-score">{scores[p.id] || 0} оч.</div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
-      {/* Полный список — компактно, остальные ниже подиума */}
-      {hasScores && ranked.length > 3 && (
-        <div className="results-full-table" style={{marginTop: 14}}>
-          {ranked.slice(3).map((p, i) => (
-            <div key={p.id} className="results-row">
-              <span className="results-row-rank">{i + 4}</span>
-              <PlayerAvatar player={p} auth={null} myId={null} size={28} className="results-row-avatar"/>
-              <span className="results-row-name">{p.name}</span>
-              <span className="results-row-score">{scores[p.id] || 0} оч.</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Если очков нет — выводим «титулы вечера» (TitlesBoard) ниже карточки.
-          Для «Кто из нас» отдельная карточка-рейтинг «Кто выделился» уже
-          показана выше, дублировать не нужно. */}
-      {!hasScores && game.id !== 'whoofus' && (
-        <div style={{marginTop: 14}}>
-          <TitlesBoard players={players} game={game}/>
-        </div>
-      )}
+      {/* Единый рейтинг 2-5 место. 1-е уже в большой winner-card сверху.
+          Старые блоки (podium-row 2-3 и results-full-table) убраны — теперь
+          один последовательный список с per-place ачивкой, очками и аватарами. */}
+      <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
 
       {/* Share block — компактнее, в стилистике карточки */}
       <div className="share-card share-card-v2" style={{marginTop: 18}}>
