@@ -12,25 +12,21 @@
 //   "правда" | "truth"          → случайная карточка-вопрос «Правда»
 //   "действие" | "dare"         → случайная карточка-задание «Действие»
 //   "никогда" | "never"         → случайная «Я никогда не…»
-//   "скорее" | "most" | "кто из нас" → случайный «Кто скорее всего…»
+//   "whoofus" | "кто из нас" → случайный «Кто из нас»
 //   "карточка" | "random"       → 4 случайные карточки разных типов
 //   "позвать" | "invite"        → красивая пригласительная карточка
 
 export const INLINE_GAMES = [
-  { id: 'truth',      title: 'Правда или действие',  emoji: '🎯', short: 'Узнаешь о друзьях такое, что не забудешь', players: '3–10', vibes: ['warmup','funny','spicy'] },
-  { id: 'never',      title: 'Я никогда не…',         emoji: '🙅', short: 'Чья жизнь богаче? Сейчас разберёмся',     players: '3–12', vibes: ['warmup','funny','spicy','deep'] },
-  { id: 'whoofus',    title: 'Кто из нас',            emoji: '👥', short: 'Голосование о том, кто в комнате…',       players: '4–12', vibes: ['funny','spicy'] },
-  { id: 'most',       title: 'Кто скорее всего…',     emoji: '👑', short: 'Назови, кто из друзей сделает это первым', players: '4–12', vibes: ['funny','spicy'] },
-  { id: 'five',       title: '5 секунд',              emoji: '⏱️', short: 'Назови 3 ответа за 5 секунд',             players: '3–10', vibes: ['warmup','funny'] },
-  { id: 'spy',        title: 'Шпион',                 emoji: '🕵️', short: 'Найди шпиона среди своих',                 players: '4–10', vibes: ['funny','deep'] },
-  { id: 'alias',      title: 'Элиас',                 emoji: '💬', short: 'Объясняй слова — командой против времени', players: '4–12', vibes: ['warmup','funny'] },
-  { id: 'crocodile',  title: 'Крокодил',              emoji: '🧠', short: 'Показывай слово без слов',                 players: '3–12', vibes: ['warmup','funny'] },
-  { id: 'whoami',     title: 'Кто я?',                emoji: '🔎', short: 'Угадай, кем тебя загадали',                players: '3–8',  vibes: ['funny','new_people'] },
-  { id: 'fact',       title: 'Угадай факт о друге',   emoji: '❤️', short: 'Узнайте друг друга глубже',                players: '4–10', vibes: ['deep','new_people'] },
-  { id: 'memes',      title: 'Мем-батл',              emoji: '😂', short: 'Кто придумает лучший мем',                 players: '3–10', vibes: ['funny'] },
-  { id: 'hot_seat',   title: 'Горячий стул',          emoji: '🔥', short: 'Один отвечает — все спрашивают',           players: '3–10', vibes: ['deep','spicy'] },
-  { id: 'taboo',      title: 'Табу',                  emoji: '🚫', short: 'Объясни слово, не используя запретные',    players: '4–10', vibes: ['funny'] },
-  { id: 'associations', title: 'Ассоциации',          emoji: '✨', short: 'Цепочка ассоциаций без повторов',          players: '3–10', vibes: ['warmup','chill'] },
+  { id: 'truth',        title: 'Правда или действие',  emoji: '🎯', short: 'Узнаешь о друзьях такое, что не забудешь', players: '3–10', vibes: ['warmup','funny'] },
+  { id: 'never',        title: 'Я никогда не…',         emoji: '🙅', short: 'Чья жизнь богаче? Сейчас разберёмся',     players: '3–12', vibes: ['warmup','funny','deep'] },
+  { id: 'whoofus',      title: 'Кто из нас',            emoji: '👥', short: 'Голосование о том, кто в комнате…',       players: '4–12', vibes: ['funny'] },
+  { id: 'would_rather', title: 'Что выберешь?',         emoji: '⚖️', short: 'Дилемма: А или Б, голосуй и спорь',      players: '2–12', vibes: ['warmup','funny','deep'] },
+  { id: 'five',         title: '5 секунд',              emoji: '⏱️', short: 'Назови 3 ответа за 5 секунд',             players: '3–10', vibes: ['warmup','funny'] },
+  { id: 'spy',          title: 'Шпион',                 emoji: '🕵️', short: 'Найди шпиона среди своих',                players: '4–10', vibes: ['funny','deep'] },
+  { id: 'alias',        title: 'Элиас',                 emoji: '💬', short: 'Объясняй слова — командой против времени', players: '4–12', vibes: ['warmup','funny'] },
+  { id: 'crocodile',    title: 'Крокодил',              emoji: '🧠', short: 'Показывай слово без слов',                players: '3–12', vibes: ['warmup','funny'] },
+  { id: 'whoami',       title: 'Кто я?',                emoji: '🔎', short: 'Угадай, кем тебя загадали',               players: '3–8',  vibes: ['funny','new_people'] },
+  { id: 'associations', title: 'Ассоциации',            emoji: '✨', short: 'Цепочка ассоциаций без повторов',         players: '3–10', vibes: ['warmup'] },
 ];
 
 export const VIBE_LABELS = {
@@ -77,17 +73,17 @@ export const INLINE_CARDS = {
     'отправлял письмо или сообщение не тому адресату',
     'делал вид, что занят телефоном, чтобы избежать общения',
   ],
-  most: [
-    'разбогатеет первым',
-    'забудет день рождения лучшего друга',
-    'станет звездой соцсетей',
-    'переедет в другую страну',
-    'будет спорить с таксистом',
-    'опоздает на собственную свадьбу',
-    'случайно поставит лайк бывшему в 2 ночи',
-    'влюбится с первого взгляда в случайного человека',
-    'останется работать на этой же работе через 10 лет',
-    'станет родителем первым из нас',
+  whoofus: [
+    'разбогатеет первым из нас?',
+    'забудет день рождения лучшего друга?',
+    'станет звездой соцсетей?',
+    'переедет в другую страну?',
+    'будет спорить с таксистом?',
+    'случайно поставит лайк бывшему в 2 ночи?',
+    'влюбится с первого взгляда в случайного человека?',
+    'останется работать на этой же работе через 10 лет?',
+    'станет родителем первым из нас?',
+    'дольше всех собирается утром?',
   ],
 };
 
@@ -117,8 +113,8 @@ function gameResult(env, game, directLink) {
 }
 
 function cardResult(env, kind, text, directLink) {
-  const labels = { truth: '🎯 Правда', dare: '🔥 Действие', never: '🙅 Я никогда не…', most: '👑 Кто скорее всего…' };
-  const games  = { truth: 'truth', dare: 'truth', never: 'never', most: 'most' };
+  const labels = { truth: '🎯 Правда', dare: '🔥 Действие', never: '🙅 Я никогда не…', whoofus: '👥 Кто из нас' };
+  const games  = { truth: 'truth', dare: 'truth', never: 'never', whoofus: 'whoofus' };
   const link = directLink(env, `g_${games[kind] || 'truth'}`);
   const messageText =
     `<b>${labels[kind] || 'Карточка'}</b>\n\n` +
@@ -140,11 +136,11 @@ function inviteResult(env, directLink) {
     type: 'article',
     id: `invite_${uid()}`,
     title: '🎉 Позвать друзей в PartyUp',
-    description: '16 игр для весёлой компании — старт за 10 секунд',
+    description: 'Лучшие игры для компаний — старт за 10 секунд',
     input_message_content: {
       message_text:
         `🎉 <b>Зову играть в PartyUp!</b>\n` +
-        `16 игр для весёлой компании — Мафия, Правда или действие, Крокодил, Элиас и другие.\n\n` +
+        `Лучшие игры для компаний в одном приложении. Выбор вайба меняет весь контент и тон. Мультиплеер с друзьями в два клика.\n\n` +
         `Старт за 10 секунд, без регистраций:\n${link}`,
       parse_mode: 'HTML',
     },
@@ -370,15 +366,15 @@ export function buildInlineResults(env, query, directLink) {
   if (/^(never|никогда)/i.test(q)) {
     return pick(INLINE_CARDS.never, 4).map(t => cardResult(env, 'never', t, directLink));
   }
-  if (/^(most|скорее|кто из)/i.test(q)) {
-    return pick(INLINE_CARDS.most, 4).map(t => cardResult(env, 'most', t, directLink));
+  if (/^(whoofus|кто из|кто из нас)/i.test(q)) {
+    return pick(INLINE_CARDS.whoofus, 4).map(t => cardResult(env, 'whoofus', t, directLink));
   }
   if (/^(card|карточка|random|случай)/i.test(q)) {
     return [
       cardResult(env, 'truth', pick(INLINE_CARDS.truth, 1)[0], directLink),
       cardResult(env, 'dare', pick(INLINE_CARDS.dare, 1)[0], directLink),
       cardResult(env, 'never', pick(INLINE_CARDS.never, 1)[0], directLink),
-      cardResult(env, 'most', pick(INLINE_CARDS.most, 1)[0], directLink),
+      cardResult(env, 'whoofus', pick(INLINE_CARDS.whoofus, 1)[0], directLink),
     ];
   }
 

@@ -43,7 +43,13 @@ export const api = {
   startSession: (payload) => post('/api/session/start', payload),
   finishSession: (payload) => post('/api/session/finish', payload),
   leaderboard: (gameId) => get(`/api/leaderboard${gameId ? `?gameId=${gameId}` : ''}`),
-  friends: () => get('/api/friends'),
+  friends: (opts = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    if (opts.offset) qs.set('offset', String(opts.offset));
+    const s = qs.toString();
+    return get(`/api/friends${s ? `?${s}` : ''}`);
+  },
   // Создаёт ссылку на счёт Telegram Stars для покупки пака.
   // Возвращает { invoiceUrl } — передаётся в tg.openInvoice().
   createInvoice: (packId) => post('/api/payments/invoice', { packId }),

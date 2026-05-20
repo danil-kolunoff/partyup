@@ -1170,11 +1170,12 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 .five-label { font-size: 14px; color: var(--muted); margin-top: 4px; }
 .five-done-banner {
   display: flex; align-items: center; justify-content: center; gap: 10px;
-  padding: 16px; border-radius: var(--r-md); margin: 16px 0;
-  background: rgba(255,149,0,0.1); border: 1px solid rgba(255,149,0,0.25);
-  font-size: 17px; font-weight: 700; color: #ff9500;
-  animation: bounceIn 0.4s var(--spring) both;
+  padding: 14px 18px; border-radius: var(--r-md); margin: 16px 0 8px;
+  background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.20);
+  font-size: 15px; font-weight: 600; color: var(--text);
+  animation: bounceIn 0.35s var(--spring) both;
 }
+.five-done-banner svg { color: var(--accent-2); opacity: 0.85; }
 
 /* ════════════════════════════════════════════════
    SPY
@@ -1419,20 +1420,34 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px;
 }
 .five-btn-success, .five-btn-fail {
+  position: relative;
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 18px; border-radius: var(--r-md); font-size: 16px; font-weight: 700;
-  transition: all var(--fast) var(--ease-out);
+  padding: 18px 16px;
+  border-radius: 16px;
+  border: none;
+  font-size: 16px; font-weight: 700; letter-spacing: -0.01em;
+  color: #fff;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+  transition: transform var(--fast) var(--spring), box-shadow var(--fast), opacity var(--fast);
+}
+.five-btn-success::before, .five-btn-fail::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(120% 60% at 50% 0%, rgba(255,255,255,0.18), transparent 70%);
+  pointer-events: none;
 }
 .five-btn-success {
-  background: rgba(48,209,88,0.12); border: 1.5px solid rgba(48,209,88,0.3); color: #30d158;
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  box-shadow: 0 6px 20px rgba(16,185,129,0.30);
 }
-.five-btn-success:hover { background: rgba(48,209,88,0.22); }
-.five-btn-success:active { transform: scale(0.93); }
+.five-btn-success:hover { opacity: 0.95; }
+.five-btn-success:active { transform: scale(0.96); }
 .five-btn-fail {
-  background: rgba(255,59,48,0.08); border: 1.5px solid rgba(255,59,48,0.2); color: #ff3b30;
+  background: linear-gradient(135deg, #fb7185 0%, #f43f5e 100%);
+  box-shadow: 0 6px 20px rgba(244,63,94,0.28);
 }
-.five-btn-fail:hover { background: rgba(255,59,48,0.15); }
-.five-btn-fail:active { transform: scale(0.93); }
+.five-btn-fail:hover { opacity: 0.95; }
+.five-btn-fail:active { transform: scale(0.96); }
 
 /* ════════════════════════════════════════════════
    WHO AM I — guess input, guessed state
@@ -3133,4 +3148,615 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 @keyframes success-ring-pulse {
   0%, 100% { opacity: 0.65; transform: scale(0.92); }
   50%      { opacity: 1;    transform: scale(1.10); }
+}
+
+/* ─── Would Rather (Что выберешь?) ────────────────────────────────────── */
+.wr-wrap {
+  display: flex; flex-direction: column; gap: 10px;
+  margin: 14px 0 12px;
+}
+.wr-card {
+  position: relative;
+  display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+  padding: 16px 16px 14px;
+  border-radius: 18px;
+  border: 1.5px solid rgba(167,139,250,0.28);
+  background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(99,102,241,0.06) 100%);
+  color: #ece9ff;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, opacity 0.25s ease, background 0.25s ease;
+  overflow: hidden;
+}
+.wr-card:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(167,139,250,0.55); }
+.wr-card:active:not(:disabled) { transform: translateY(0); }
+.wr-card:disabled { cursor: default; }
+.wr-a { background: linear-gradient(135deg, rgba(167,139,250,0.14) 0%, rgba(139,92,246,0.07) 100%); }
+.wr-b { background: linear-gradient(135deg, rgba(244,114,182,0.12) 0%, rgba(236,72,153,0.06) 100%);
+        border-color: rgba(244,114,182,0.28); }
+.wr-b:hover:not(:disabled) { border-color: rgba(244,114,182,0.55); }
+.wr-picked { border-width: 2px; box-shadow: 0 6px 22px rgba(167,139,250,0.30); }
+.wr-a.wr-picked { border-color: #a78bfa; }
+.wr-b.wr-picked { border-color: #f472b6; }
+.wr-faded { opacity: 0.6; }
+
+.wr-letter {
+  align-self: flex-start;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(167,139,250,0.22); color: #ece9ff;
+}
+.wr-b .wr-letter { background: rgba(244,114,182,0.22); }
+.wr-text {
+  font-size: 17px; line-height: 1.35; font-weight: 600;
+  color: #f5f3ff;
+}
+.wr-bar-wrap {
+  position: relative;
+  margin-top: 4px;
+  height: 26px; border-radius: 13px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+.wr-bar {
+  position: absolute; inset: 0 auto 0 0;
+  border-radius: 13px;
+  transition: width 0.6s cubic-bezier(0.22,1,0.36,1);
+}
+.wr-bar-a { background: linear-gradient(90deg, #a78bfa 0%, #8b5cf6 100%); }
+.wr-bar-b { background: linear-gradient(90deg, #f472b6 0%, #ec4899 100%); }
+.wr-pct {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 13px; font-weight: 700; color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}
+.wr-or {
+  align-self: center;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(236,233,255,0.5);
+  padding: 0 8px;
+}
+.wr-comment {
+  margin: 6px 4px 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(167,139,250,0.08);
+  border: 1px solid rgba(167,139,250,0.18);
+  color: #ece9ff;
+  font-size: 14px; line-height: 1.45;
+  text-align: center;
+}
+
+.friend-guest-badge {
+  display: inline-block; margin-left: 6px;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  background: rgba(167,139,250,0.15);
+  color: var(--accent-2);
+  vertical-align: middle;
+}
+
+/* Unified row inside .setup-axis-card with inline tabs (для CardCountSelector).
+   Визуально идентично setup-axis-row (Vibe), только справа — компактные tab-кнопки
+   вместо value+chevron. */
+.setup-axis-tabs-row {
+  width: 100%; padding: 10px 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+}
+.setup-axis-tabs {
+  display: inline-flex; gap: 6px; flex-shrink: 0;
+}
+.setup-axis-tab {
+  min-width: 44px; height: 32px; padding: 0 12px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1.5px solid var(--border);
+  color: var(--muted);
+  font-size: 13px; font-weight: 700;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: background var(--fast), border-color var(--fast), color var(--fast), transform var(--fast) var(--spring);
+}
+.setup-axis-tab:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+.setup-axis-tab:active { transform: scale(0.95); }
+.setup-axis-tab.is-active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+/* В лобби — два axis-card подряд хочется визуально сгруппировать. */
+.lobby-axis-stack { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.lobby-axis-stack .setup-axis-card { margin-top: 0 !important; }
+
+/* ─── Универсальная кнопка выхода (top-left на screen-уровне) ──────────── */
+.screen-exit-btn {
+  position: absolute; top: max(env(safe-area-inset-top, 0px), 14px); left: 14px;
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: 1px solid var(--border);
+  background: rgba(20, 20, 30, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--text);
+  cursor: pointer;
+  z-index: 20;
+  transition: background var(--fast), transform var(--fast) var(--spring), border-color var(--fast);
+  -webkit-tap-highlight-color: transparent;
+}
+.screen-exit-btn:hover { background: rgba(40, 40, 60, 0.75); border-color: var(--border-2); }
+.screen-exit-btn:active { transform: scale(0.92); }
+
+/* В шапке игры (game-detail) — центральное лого + текст не «съезжают» вправо,
+   просто overlay-кнопка слева сверху. game-hero уже имеет позиционирование. */
+.game-detail-screen { position: relative; }
+
+/* Round exit — отличается, чтобы не мешать игровому UI. */
+.round-exit-btn { background: rgba(20, 20, 30, 0.75); }
+
+.friends-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 14px; padding: 10px 4px;
+  gap: 10px;
+}
+.friends-pager .btn-ghost {
+  padding: 8px 14px; min-height: 38px;
+  font-size: 13px; font-weight: 600;
+}
+.friends-pager .btn-ghost:disabled { opacity: 0.35; cursor: not-allowed; }
+.friends-pager-info {
+  font-size: 12px; color: var(--muted);
+  text-align: center; flex: 1;
+}
+
+/* ─── Screen-top bar with back button (inline, not overlay) ─────────── */
+.screen-top-bar {
+  display: flex; align-items: center; justify-content: flex-start;
+  margin: -4px -2px 12px;
+  padding: 4px 0;
+}
+.screen-back-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px 7px 8px; border-radius: 999px;
+  background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.22);
+  color: var(--accent-2);
+  font-size: 13px; font-weight: 600; line-height: 1;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: background var(--fast), border-color var(--fast), transform var(--fast) var(--spring);
+}
+.screen-back-btn:hover { background: rgba(167,139,250,0.18); border-color: rgba(167,139,250,0.40); }
+.screen-back-btn:active { transform: scale(0.95); }
+.screen-back-btn svg { color: inherit; }
+
+/* ─── "Я никогда не" — multiplayer voting ─────────────────────────────── */
+.never-vote-block {
+  margin-top: 16px; padding: 16px;
+  border-radius: 16px;
+  background: rgba(167,139,250,0.06);
+  border: 1px solid rgba(167,139,250,0.18);
+  text-align: center;
+}
+.never-vote-label {
+  font-size: 13px; font-weight: 700; color: var(--muted);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.never-vote-row {
+  display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+}
+.never-vote-btn {
+  flex: 1; min-width: 140px; min-height: 56px;
+  padding: 12px 18px;
+  border-radius: 14px; border: 2px solid;
+  font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform var(--fast) var(--spring), background var(--fast), box-shadow var(--fast);
+  color: #fff;
+}
+.never-vote-btn:active { transform: scale(0.96); }
+.never-vote-yes {
+  background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+  border-color: transparent;
+  box-shadow: 0 6px 20px rgba(139,92,246,0.30);
+}
+.never-vote-no {
+  background: linear-gradient(135deg, #f472b6 0%, #ec4899 100%);
+  border-color: transparent;
+  box-shadow: 0 6px 20px rgba(236,72,153,0.30);
+}
+.never-vote-done {
+  font-size: 15px; line-height: 1.4; color: var(--text);
+  padding: 10px 14px;
+}
+.never-vote-done b { color: var(--accent-2); }
+.never-progress {
+  margin-top: 12px;
+  font-size: 12px; color: var(--muted);
+  letter-spacing: 0.05em; text-transform: uppercase; font-weight: 700;
+}
+
+.never-reveal-block {
+  margin-top: 16px;
+}
+.never-reveal-summary {
+  text-align: center;
+  font-size: 16px; padding: 12px 16px;
+  border-radius: 14px;
+  background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.22);
+  color: var(--text); margin-bottom: 12px;
+}
+.never-reveal-summary b { color: var(--accent-2); }
+.never-reveal-list {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.never-reveal-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--s2);
+}
+.never-reveal-row.is-yes { border-color: rgba(167,139,250,0.40); background: rgba(167,139,250,0.06); }
+.never-reveal-row.is-no  { border-color: rgba(244,114,182,0.30); background: rgba(244,114,182,0.04); }
+.never-reveal-row .never-player-emoji { font-size: 20px; }
+.never-reveal-row .never-player-name { flex: 1; font-weight: 600; color: var(--text); }
+.never-reveal-vote { font-size: 13px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+
+/* Never Have I — итоговая статистика по игрокам */
+.never-stats-card {
+  margin: 16px 0;
+  padding: 14px;
+  border-radius: 16px;
+  background: var(--s2);
+  border: 1px solid var(--border);
+}
+.never-stats-title {
+  font-size: 14px; font-weight: 700;
+  margin-bottom: 12px;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.never-stats-list { display: flex; flex-direction: column; gap: 10px; }
+.never-stats-row { display: flex; align-items: center; gap: 10px; }
+.never-stats-avatar { width: 36px !important; height: 36px !important; font-size: 18px !important; cursor: default; }
+.never-stats-info { flex: 1; min-width: 0; }
+.never-stats-name { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.never-stats-bar {
+  height: 6px; border-radius: 4px;
+  background: rgba(244,114,182,0.20); overflow: hidden;
+}
+.never-stats-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #a78bfa 0%, #8b5cf6 100%);
+  border-radius: 4px;
+}
+.never-stats-counts {
+  display: flex; gap: 8px; font-size: 12px; font-weight: 700;
+  color: var(--muted); white-space: nowrap;
+}
+
+/* ─── PartyUp Premium — бейджи, плашки, модал ─────────────────────────── */
+@keyframes premiumGlow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+.premium-glow {
+  background: linear-gradient(90deg, #fbbf24 0%, #f472b6 25%, #a78bfa 50%, #60a5fa 75%, #fbbf24 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  animation: premiumGlow 5s ease-in-out infinite;
+}
+
+/* Маленький бейдж в ProfileCard — лёгкая, минималистичная обводка */
+.premium-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 6px;
+  padding: 4px 11px 4px 9px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(251,191,36,0.06), rgba(167,139,250,0.05));
+  border: 1px solid rgba(251,191,36,0.16);
+  color: var(--text);
+  font-size: 11px; font-weight: 700; line-height: 1;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform var(--fast) var(--spring), border-color var(--fast);
+}
+.premium-badge:hover { border-color: rgba(251,191,36,0.30); }
+.premium-badge:active { transform: scale(0.96); }
+.premium-badge svg { color: #fbbf24; opacity: 0.85; }
+.premium-badge-text { white-space: nowrap; }
+.premium-badge-cta {
+  border-color: rgba(167,139,250,0.22);
+  background: rgba(167,139,250,0.08);
+}
+
+/* «Premium» рядом с логотипом PartyUp в шапке — кнопка, без обводки,
+   с тем же размером шрифта что и название. По тапу открывает модал. */
+.brand-name { display: inline-flex; align-items: baseline; gap: 7px; }
+.brand-premium-btn {
+  display: inline-block;
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; line-height: 1;
+  letter-spacing: inherit;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform var(--fast) var(--spring), opacity var(--fast);
+}
+.brand-premium-btn:hover { opacity: 0.9; }
+.brand-premium-btn:active { transform: scale(0.92); }
+.brand-premium-btn .premium-glow {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* Карточка Premium в Настройках */
+.settings-premium-card {
+  width: 100%;
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(251,191,36,0.06) 100%);
+  border: 1px solid rgba(167,139,250,0.28);
+  color: var(--text);
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform var(--fast) var(--spring), border-color var(--fast), background var(--fast);
+}
+.settings-premium-card:hover { border-color: rgba(251,191,36,0.45); }
+.settings-premium-card:active { transform: scale(0.985); }
+.settings-premium-card.is-active {
+  background: linear-gradient(135deg, rgba(251,191,36,0.10) 0%, rgba(167,139,250,0.12) 100%);
+  border-color: rgba(251,191,36,0.40);
+}
+.settings-premium-icon {
+  width: 44px; height: 44px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(251,191,36,0.12);
+  color: #fbbf24;
+  flex-shrink: 0;
+}
+.settings-premium-body { flex: 1; min-width: 0; text-align: left; }
+.settings-premium-title {
+  font-size: 16px; font-weight: 700; line-height: 1.2;
+  letter-spacing: -0.01em;
+  margin-bottom: 3px;
+}
+.settings-premium-sub {
+  font-size: 12px; color: var(--muted); line-height: 1.3;
+}
+
+/* Модал */
+.premium-modal {
+  position: relative;
+  padding: 28px 24px;
+  text-align: center;
+  overflow: hidden;
+}
+.premium-modal-glow {
+  position: absolute; inset: -50% -50% auto auto;
+  width: 200%; height: 200%;
+  background: radial-gradient(circle at 50% 0%, rgba(251,191,36,0.18), transparent 50%);
+  pointer-events: none;
+}
+.premium-modal-icon {
+  position: relative;
+  width: 72px; height: 72px;
+  margin: 0 auto 12px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(251,191,36,0.18), rgba(167,139,250,0.18));
+  color: #fbbf24;
+  box-shadow: 0 10px 30px rgba(251,191,36,0.20);
+}
+.premium-modal-title {
+  margin: 0 0 10px;
+  font-size: 24px; font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.premium-modal-desc {
+  color: var(--muted);
+  font-size: 14px; line-height: 1.5;
+  margin: 0 0 14px;
+}
+.premium-benefits {
+  list-style: none; padding: 0; margin: 14px 0 14px;
+  display: flex; flex-direction: column; gap: 8px;
+  text-align: left;
+}
+.premium-benefits li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(167,139,250,0.06);
+  font-size: 14px;
+}
+.premium-benefits svg { color: #fbbf24; flex-shrink: 0; }
+.premium-price {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  margin-top: 6px;
+  padding: 10px 18px;
+  border-radius: 16px;
+  background: rgba(251,191,36,0.08);
+  border: 1px solid rgba(251,191,36,0.22);
+}
+.premium-price-stars { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; }
+.premium-price-rub { font-size: 13px; color: var(--muted); }
+
+.premium-active-state {
+  margin: 6px 0 6px;
+}
+.premium-active-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  margin-bottom: 10px;
+  border-radius: 999px;
+  background: rgba(48,209,88,0.12);
+  border: 1px solid rgba(48,209,88,0.30);
+  color: #30d158;
+  font-size: 13px; font-weight: 700;
+}
+.premium-active-until {
+  font-size: 15px; font-weight: 600;
+  color: var(--text);
+}
+
+/* ─── Вертикальный список игроков для голосования (Кто из нас и т.п.) ── */
+.player-vote-list {
+  display: flex; flex-direction: column; gap: 10px;
+  margin: 0;
+}
+.player-vote-card {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--s2);
+  border: 1.5px solid var(--border);
+  color: var(--text);
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: transform var(--fast) var(--spring), border-color var(--fast), background var(--fast), opacity var(--fast);
+  font: inherit; text-align: left;
+}
+.player-vote-card:hover:not(:disabled) { border-color: var(--accent); background: rgba(167,139,250,0.06); }
+.player-vote-card:active:not(:disabled) { transform: scale(0.985); }
+.player-vote-card:disabled { cursor: default; }
+.player-vote-card.is-picked {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(167,139,250,0.14), rgba(99,102,241,0.08));
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.player-vote-card.is-faded { opacity: 0.55; }
+.player-vote-name { flex: 1; font-weight: 600; font-size: 15px; }
+.player-vote-status {
+  margin-left: auto;
+  font-size: 13px; color: var(--accent-2); font-weight: 700;
+}
+.player-vote-check { color: var(--accent-2); }
+
+.vote-winners-list {
+  display: flex; flex-direction: column; gap: 10px;
+  margin: 10px 0 14px;
+}
+.vote-winner-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.30);
+}
+.vote-winner-row strong { flex: 1; font-size: 16px; }
+.vote-winner-count {
+  font-size: 12px; color: var(--muted); font-weight: 700;
+  white-space: nowrap;
+}
+.vote-detail-list {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.vote-detail-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--muted);
+}
+.vote-detail-from { font-weight: 600; }
+.vote-detail-to { color: var(--text); }
+
+/* ─── Welcome modal v2 — hero + tagline + sub-note ─────────────────────── */
+.welcome-modal-v2 { padding: 22px 22px 22px; position: relative; overflow: hidden; }
+.welcome-hero {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  margin: -8px -8px 6px;
+  padding: 14px 0 4px;
+}
+.welcome-hero-glow {
+  position: absolute; inset: -40% -20% auto -20%;
+  height: 180%;
+  background: radial-gradient(60% 50% at 50% 35%, rgba(167,139,250,0.30), transparent 70%);
+  pointer-events: none; z-index: 0;
+}
+.welcome-modal-v2 .welcome-emoji-row { position: relative; z-index: 1; }
+.welcome-tagline {
+  text-align: center; color: var(--muted);
+  font-size: 14px; line-height: 1.55;
+  margin: 8px 4px 18px;
+}
+.welcome-sub-note {
+  text-align: center;
+  font-size: 12px; line-height: 1.5; color: var(--muted);
+  margin: 12px 4px 0;
+}
+
+/* Список премиум-паков в модале подписки */
+.premium-packs-block {
+  margin: 14px 0;
+  padding: 14px 14px 12px;
+  border-radius: 14px;
+  background: rgba(167,139,250,0.06);
+  border: 1px solid rgba(167,139,250,0.16);
+}
+.premium-packs-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.premium-packs-title svg { color: #fbbf24; }
+.premium-packs-list { display: flex; flex-direction: column; gap: 8px; }
+.premium-pack-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0,0,0,0.20);
+  border: 1px solid rgba(255,255,255,0.04);
+  text-align: left;
+}
+.premium-pack-emoji {
+  width: 36px; height: 36px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: rgba(167,139,250,0.10);
+  color: var(--accent-2);
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.premium-pack-info { flex: 1; min-width: 0; }
+.premium-pack-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 14px; font-weight: 700;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.premium-pack-unlocked { color: #30d158; }
+.premium-pack-desc {
+  font-size: 12px; line-height: 1.45; color: var(--muted);
+}
+.premium-pack-future {
+  background: linear-gradient(135deg, rgba(251,191,36,0.05), rgba(167,139,250,0.04));
+  border-color: rgba(251,191,36,0.15);
+}
+.premium-pack-future .premium-pack-emoji {
+  background: rgba(251,191,36,0.10); color: #fbbf24;
+}
+
+/* 5 секунд — карточки топ-5 в финале: medal + title + name + sub-line */
+.five-place-row { align-items: flex-start; padding: 12px 14px; }
+.five-place-row .never-stats-info { display: flex; flex-direction: column; gap: 4px; }
+.five-place-row .never-stats-bar { margin-top: 6px; }
+.five-place-medal { font-size: 16px; }
+.five-place-title {
+  font-weight: 700; color: var(--text);
+  letter-spacing: -0.01em;
+}
+.five-place-divider { color: rgba(255,255,255,0.18); margin: 0 2px; }
+.five-place-pname { font-weight: 600; color: var(--muted); }
+.five-place-sub {
+  font-size: 12px; color: var(--muted); line-height: 1.3;
+  margin: -2px 0 2px;
 }

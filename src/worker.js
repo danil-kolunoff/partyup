@@ -344,36 +344,63 @@ async function handleUpdate(update, env) {
     const sp = update.message.successful_payment;
     const fromId = update.message.from?.id;
     const payload = String(sp.invoice_payload || '');
-    const m = payload.match(/^pack:([^:]+):(\d+)$/);
-    if (m && fromId) {
-      const [, packId, userIdStr] = m;
+    const ts = now();
+    // ── Пакет: pack:<packId>:<userId> ────────────────────────────────
+    const mPack = payload.match(/^pack:([^:]+):(\d+)$/);
+    if (mPack && fromId) {
+      const [, packId, userIdStr] = mPack;
       const userId = Number(userIdStr);
       if (userId === fromId) {
         try {
-          const ts = now();
-          // 1) пометить последний pending purchase этого юзера для этого пака
           await env.DB.prepare(
             `UPDATE purchases SET status='paid', tg_payment_charge_id=?, paid_at=?
              WHERE user_id=? AND item_type='pack' AND item_id=? AND status='pending'`
           ).bind(sp.telegram_payment_charge_id || null, ts, userId, packId).run();
-          // 2) выдать пак (идемпотентно через PRIMARY KEY (user_id, pack_id))
           await env.DB.prepare(
             `INSERT INTO user_packs (user_id, pack_id, source, acquired_at)
              VALUES (?, ?, 'stars', ?)
              ON CONFLICT(user_id, pack_id) DO NOTHING`
           ).bind(userId, packId, ts).run();
-          // 3) подтверждение в чат
           await tg(env, 'sendMessage', {
             chat_id: fromId,
             text: `✨ Пак активирован! Открой PartyUp — теперь карточки доступны во всех играх.`,
-            reply_markup: {
-              inline_keyboard: [[
-                { text: '🎮 Открыть PartyUp', web_app: { url: env.WEBAPP_URL || WEBAPP_URL_DEFAULT } },
-              ]],
-            },
+            reply_markup: { inline_keyboard: [[
+              { text: '🎮 Открыть PartyUp', web_app: { url: env.WEBAPP_URL || WEBAPP_URL_DEFAULT } },
+            ]] },
           });
-        } catch (e) { console.error('successful_payment handler', e); }
+        } catch (e) { console.error('payment-pack', e); }
       }
+      return;
+    }
+    // ── Подписка: sub:premium_30d:<userId> ───────────────────────────
+    const mSub = payload.match(/^sub:([^:]+):(\d+)$/);
+    if (mSub && fromId) {
+      const [, subId, userIdStr] = mSub;
+      const userId = Number(userIdStr);
+      if (userId === fromId && subId === PREMIUM_SUBSCRIPTION.id) {
+        try {
+          await env.DB.prepare(
+            `UPDATE purchases SET status='paid', tg_payment_charge_id=?, paid_at=?
+             WHERE user_id=? AND item_type='subscription' AND item_id=? AND status='pending'`
+          ).bind(sp.telegram_payment_charge_id || null, ts, userId, subId).run();
+          // Продлеваем подписку: если уже активна — добавляем 30 дней к остатку,
+          // иначе — 30 дней с момента покупки.
+          const u = await env.DB.prepare(`SELECT premium_until FROM users WHERE tg_id = ?`).bind(userId).first();
+          const cur = Number(u?.premium_until || 0);
+          const base = cur > ts ? cur : ts;
+          const ext = base + PREMIUM_SUBSCRIPTION.duration_days * 86400000;
+          await env.DB.prepare(`UPDATE users SET premium_until = ? WHERE tg_id = ?`).bind(ext, userId).run();
+          await tg(env, 'sendMessage', {
+            chat_id: fromId,
+            parse_mode: 'HTML',
+            text: `🌟 <b>PartyUp Premium активирован!</b>\nДоступ ко всем пакам открыт до <b>${new Date(ext).toLocaleDateString('ru-RU')}</b>.`,
+            reply_markup: { inline_keyboard: [[
+              { text: '🎮 Открыть PartyUp', web_app: { url: env.WEBAPP_URL || WEBAPP_URL_DEFAULT } },
+            ]] },
+          });
+        } catch (e) { console.error('payment-sub', e); }
+      }
+      return;
     }
     return;
   }
@@ -583,12 +610,11 @@ async function handleUpdate(update, env) {
       parse_mode: 'HTML',
       text:
         `Привет, <b>${escapeHtml(firstName)}</b> 🎉\n\n` +
-        `<b>PartyUp</b> — 16 игр для весёлой компании в одном Mini App. ` +
-        `Мафия, Бункер, Элиас, Шпион, Правда или действие и ещё 11.\n\n` +
+        `<b>PartyUp</b> — лучшие игры для компаний в одном приложении.\n\n` +
+        `🎨 Выбор вайба меняет весь контент и тон в играх\n` +
+        `🔗 Мультиплеер с друзьями в два клика\n` +
         `⚡ Старт за 10 секунд — без регистраций\n` +
-        `👥 От 2 до 20 игроков\n` +
-        `🌶️ Вайбы: смешной, острый, для близких, 18+\n` +
-        `🔗 Онлайн-комнаты — играй с друзьями по ссылке\n\n` +
+        `👥 От 2 до 20 игроков\n\n` +
         `Жми кнопку ниже или меню «🎮 Играть» в чате — Mini App откроется сразу.\n\n` +
         `💡 В любом чате набери <code>@${botUsername(env)} карточка</code> — кину случайный вопрос «Правды или действия» или «Я никогда не…».`,
       reply_markup: playButton,
@@ -688,9 +714,9 @@ async function handleUpdate(update, env) {
       text:
         `<b>Что умеет @${botUsername(env)}</b>\n\n` +
         `<b>В Mini App:</b>\n` +
-        `• 16 игр для компании от 2 до 20 человек\n` +
-        `• Локальный режим (один телефон) и онлайн-комнаты\n` +
-        `• Умный подбор по вайбу и числу игроков\n\n` +
+        `• Лучшие игры для компаний от 2 до 20 человек\n` +
+        `• Выбор вайба меняет весь контент и тон\n` +
+        `• Локальный режим (один телефон) и мультиплеер в два клика\n\n` +
         `<b>В любом чате через inline (набирай @${botUsername(env)} …):</b>\n` +
         `• <code>правда</code> · <code>действие</code> · <code>никогда</code> · <code>скорее</code> — случайные карточки\n` +
         `• <code>карточка</code> — 4 случайные карточки разом\n` +
@@ -745,18 +771,72 @@ export class GameRoom {
     ).run();
   }
 
+  // Обогащает массив players актуальными user_id/anon_id из D1
+  // (room_players) и photo_url/username/display_name из users.
+  // Вынесено в общий хелпер: используется и в /state, и в /join, чтобы
+  // первый ответ гостю уже содержал аватарки и реальные имена.
+  async enrichPlayers(roomId, hostId, players) {
+    if (!this.env.DB || !players?.length) {
+      return players.map(p => ({ ...p, isHost: p.id === hostId }));
+    }
+    let out = players.map(p => ({ ...p, isHost: p.id === hostId }));
+    try {
+      const phs = out.map(() => '?').join(',');
+      const rsRp = await this.env.DB.prepare(
+        `SELECT player_id, user_id, anon_id FROM room_players
+         WHERE room_id = ? AND player_id IN (${phs})`
+      ).bind(roomId, ...out.map(p => p.id)).all();
+      const rpById = new Map((rsRp.results || []).map(r => [r.player_id, r]));
+      out = out.map(p => {
+        const rp = rpById.get(p.id);
+        if (!rp) return p;
+        return {
+          ...p,
+          userId: p.userId || (rp.user_id != null ? Number(rp.user_id) : null),
+          anonId: p.anonId || rp.anon_id || null,
+          telegramId: p.telegramId || (rp.user_id != null ? Number(rp.user_id) : null),
+        };
+      });
+      const ids = [...new Set(out.map(p => p.userId).filter(Number.isInteger))];
+      if (ids.length) {
+        const placeholders = ids.map(() => '?').join(',');
+        const rs = await this.env.DB.prepare(
+          `SELECT tg_id, username, photo_url, display_name, first_name, premium_until FROM users WHERE tg_id IN (${placeholders})`
+        ).bind(...ids).all();
+        const byId = new Map((rs.results || []).map(u => [Number(u.tg_id), u]));
+        const nowMs = now();
+        out = out.map(p => {
+          const u = byId.get(Number(p.userId));
+          if (!u) return p;
+          return {
+            ...p,
+            photo_url: p.photo_url || u.photo_url || null,
+            username: p.username || u.username || null,
+            name: u.display_name || u.first_name || p.name,
+            premium: Number(u.premium_until || 0) > nowMs,
+          };
+        });
+      }
+    } catch {}
+    return out;
+  }
+
   async mirrorPlayer(roomId, player) {
     if (!this.env.DB) return;
     await this.env.DB.prepare(
-      `INSERT INTO room_players (room_id, player_id, user_id, name, emoji, is_host, ready, joined_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO room_players (room_id, player_id, user_id, anon_id, name, emoji, is_host, ready, joined_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(room_id, player_id) DO UPDATE SET
-         name = excluded.name,
-         emoji = excluded.emoji,
-         ready = excluded.ready`
+         user_id = COALESCE(excluded.user_id, room_players.user_id),
+         anon_id = COALESCE(excluded.anon_id, room_players.anon_id),
+         name    = excluded.name,
+         emoji   = excluded.emoji,
+         ready   = excluded.ready,
+         is_host = excluded.is_host`
     ).bind(
       roomId, player.id,
       Number.isInteger(player.userId) ? player.userId : null,
+      player.anonId ? String(player.anonId) : null,
       player.name || null,
       player.emoji || null,
       player.isHost ? 1 : 0,
@@ -773,15 +853,13 @@ export class GameRoom {
     if (method === 'GET' && url.pathname === '/state') {
       const room = await this.state.storage.get('room');
       if (!room) return corsJson({ error: 'room_not_found' }, 404);
-      // 304 если клиент уже знает эту версию (экономит трафик, тело DO дешевле)
-      const inm = request.headers.get('if-none-match');
-      const tag = `"v${room.version || 0}"`;
-      if (inm && inm === tag) {
-        return new Response(null, { status: 304, headers: { ...CORS_HEADERS, ETag: tag, 'Cache-Control': 'no-store' } });
-      }
-      return new Response(JSON.stringify(room), {
+      // Обогащение игроков (см. enrichPlayers). 304-кэш убран т.к. user-данные
+      // могут меняться вне room.version (юзер логинится в TG ПОСЛЕ join).
+      const players = await this.enrichPlayers(room.id, room.hostId, room.players || []);
+      const out = { ...room, players };
+      return new Response(JSON.stringify(out), {
         status: 200,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', ETag: tag, 'Cache-Control': 'no-store' },
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       });
     }
 
@@ -802,8 +880,9 @@ export class GameRoom {
       };
       await this.state.storage.put('room', room);
       await this.mirrorRoom(room);
-      for (const p of room.players) await this.mirrorPlayer(room.id, { ...p, isHost: p.id === room.hostId, ready: true });
-      return corsJson(room);
+      for (const p of room.players) await this.mirrorPlayer(room.id, { ...p, anonId: p.anonId || null, isHost: p.id === room.hostId, ready: true });
+      const players = await this.enrichPlayers(room.id, room.hostId, room.players || []);
+      return corsJson({ ...room, players });
     }
 
     if (method === 'POST' && url.pathname === '/join') {
@@ -816,6 +895,7 @@ export class GameRoom {
         name: body.name,
         emoji: body.emoji || '🎉',
         userId: body.userId || null,
+        anonId: body.anonId || null,
         telegramId: body.telegramId || body.userId || null,
         photo_url: body.photo_url || null,
         username: body.username || null,
@@ -826,7 +906,9 @@ export class GameRoom {
       await this.state.storage.put('room', room);
       await this.mirrorRoom(room);
       await this.mirrorPlayer(room.id, { ...player, isHost: false, ready: true });
-      return corsJson(room);
+      // Возвращаем обогащённый ответ — гость сразу видит аватарки/имена хоста и остальных.
+      const players = await this.enrichPlayers(room.id, room.hostId, room.players || []);
+      return corsJson({ ...room, players });
     }
 
     if (method === 'POST' && url.pathname === '/action') {
@@ -852,6 +934,16 @@ export class GameRoom {
       if (body.round !== undefined) {
         room.round = body.round; // null → сброс, { choice, promptText, ... } → новое состояние
       }
+      // Хост поменял настройки (rounds/vibe) — патчим room.settings и
+      // увеличиваем version, гости подтянут через poll.
+      if (body.settings && typeof body.settings === 'object') {
+        room.settings = { ...(room.settings || {}), ...body.settings };
+      }
+      // Хост зафиксировал deck (массив карточек). Все клиенты будут читать
+      // одну и ту же карточку по индексу — гарантия синхрона + refresh-safe.
+      if (Array.isArray(body.deck)) {
+        room.deck = body.deck;
+      }
       // Замер времени активного хода — фиксируем «когда игрок начал свой ход».
       // Клиент посылает duration (ms) при завершении хода — суммируем в плеер.
       if (body.playerTime && room.players) {
@@ -864,6 +956,34 @@ export class GameRoom {
       await this.state.storage.put('room', room);
       await this.mirrorRoom(room);
       return corsJson(room);
+    }
+
+    // Явный выход игрока из лобби. Если ушёл хост — статус передаётся
+    // следующему игроку. Если игроков не осталось — комната закрывается
+    // (state='ended', чтобы все клиенты увидели это в poll и вышли в меню).
+    if (method === 'POST' && url.pathname === '/leave') {
+      const body = await request.json().catch(() => ({}));
+      const room = await this.state.storage.get('room');
+      if (!room) return corsJson({ ok: true, closed: true });
+      const pid = String(body.playerId || '');
+      const before = (room.players || []).length;
+      room.players = (room.players || []).filter(p => String(p.id) !== pid);
+      const removed = before !== room.players.length;
+      let closed = false;
+      let newHostId = room.hostId;
+      if (room.players.length === 0) {
+        room.state = 'ended';
+        closed = true;
+      } else if (String(room.hostId) === pid) {
+        // Передаём хоста следующему игроку (первый из оставшихся).
+        newHostId = room.players[0].id;
+        room.hostId = newHostId;
+      }
+      room.version = (room.version || 0) + 1;
+      room.updatedAt = now();
+      await this.state.storage.put('room', room);
+      await this.mirrorRoom(room);
+      return corsJson({ ok: true, removed, closed, hostId: newHostId });
     }
 
     return corsJson({ error: 'not_found' }, 404);
@@ -1151,16 +1271,21 @@ async function handleMe(request, env) {
   if (userId) {
     const user = await env.DB.prepare('SELECT * FROM users WHERE tg_id = ?').bind(userId).first();
     const stats = await getUserStats(env, userId);
-    const packsRs = await env.DB.prepare('SELECT pack_id FROM user_packs WHERE user_id = ?').bind(userId).all();
-    const ownedPacks = (packsRs.results || []).map(r => r.pack_id);
-    return corsJson({ mode: 'telegram', user, stats, ownedPacks });
+    // ownedPacks учитывает активную подписку (она автоматически открывает все паки).
+    const ownedPacks = await getOwnedPacks(env, userId);
+    const premiumUntil = Number(user?.premium_until || 0);
+    const premiumActive = premiumUntil > now();
+    return corsJson({
+      mode: 'telegram', user, stats, ownedPacks,
+      premium: { active: premiumActive, until: premiumActive ? premiumUntil : null },
+    });
   }
   if (anonId) {
     const user = await env.DB.prepare('SELECT * FROM anon_users WHERE anon_id = ?').bind(anonId).first();
     const stats = await getAnonStats(env, anonId);
-    return corsJson({ mode: 'anon', user, stats, ownedPacks: [] });
+    return corsJson({ mode: 'anon', user, stats, ownedPacks: [], premium: { active: false, until: null } });
   }
-  return corsJson({ mode: 'guest', user: null, stats: null, ownedPacks: [] });
+  return corsJson({ mode: 'guest', user: null, stats: null, ownedPacks: [], premium: { active: false, until: null } });
 }
 
 async function handleTrack(request, env) {
@@ -1272,23 +1397,88 @@ async function handleSessionFinish(request, env) {
 // Список соигроков текущего юзера — все, кто был с ним в одной комнате.
 // JOIN-self по room_players: rp1 = я, rp2 = другие в тех же комнатах.
 async function handleFriends(request, env) {
-  const { userId } = await resolveCaller(request, env);
-  if (!userId) return corsJson({ ok: true, rows: [] });
-  const rs = await env.DB.prepare(
-    `SELECT rp2.user_id,
-            COALESCE(u.display_name, u.first_name) AS display_name,
-            u.username, u.photo_url,
-            COUNT(DISTINCT rp2.room_id) AS games_together,
-            MAX(rp2.joined_at) AS last_seen
-     FROM room_players rp1
-     JOIN room_players rp2 ON rp2.room_id = rp1.room_id AND rp2.user_id != rp1.user_id
-     LEFT JOIN users u ON u.tg_id = rp2.user_id
-     WHERE rp1.user_id = ? AND rp2.user_id IS NOT NULL
-     GROUP BY rp2.user_id
-     ORDER BY last_seen DESC
-     LIMIT 50`
-  ).bind(userId).all();
-  return corsJson({ ok: true, rows: rs.results || [] });
+  const { userId, anonId } = await resolveCaller(request, env);
+  if (!userId && !anonId) return corsJson({ ok: true, rows: [], total: 0, limit: 20, offset: 0 });
+  const url = new URL(request.url);
+  const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
+  const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
+  // Динамическое построение условий — избегаем bind(null), т.к. в D1 это
+  // ведёт себя нестабильно (NULL-параметр в `? IS NOT NULL` иногда не
+  // вычисляется как ожидается). Условия добавляем ТОЛЬКО для ненулевых
+  // идентификаторов вызывающего.
+  const meConds = [];
+  const meArgs = [];
+  if (Number.isFinite(userId) && userId) { meConds.push('user_id = ?'); meArgs.push(Number(userId)); }
+  if (anonId) { meConds.push('anon_id = ?'); meArgs.push(String(anonId)); }
+  if (!meConds.length) return corsJson({ ok: true, rows: [], total: 0, limit, offset });
+  const meWhere = meConds.join(' OR ');
+
+  const exclConds = [];
+  const exclArgs = [];
+  // Важно: добавляем `IS NOT NULL` слева, иначе NULL = ? даёт UNKNOWN и
+  // `NOT (UNKNOWN)` тоже UNKNOWN → строка ошибочно отфильтровывается WHERE.
+  if (Number.isFinite(userId) && userId) {
+    exclConds.push('(rp.user_id IS NOT NULL AND rp.user_id = ?)');
+    exclArgs.push(Number(userId));
+  }
+  if (anonId) {
+    exclConds.push('(rp.anon_id IS NOT NULL AND rp.anon_id = ?)');
+    exclArgs.push(String(anonId));
+  }
+  const exclWhere = exclConds.length ? `AND NOT (${exclConds.join(' OR ')})` : '';
+
+  const sql = `
+    WITH me_rooms AS (
+      SELECT DISTINCT room_id FROM room_players WHERE ${meWhere}
+    ),
+    friends_raw AS (
+      SELECT rp.user_id, rp.anon_id, rp.name, rp.emoji,
+             rp.room_id, rp.joined_at
+      FROM room_players rp
+      JOIN me_rooms mr ON mr.room_id = rp.room_id
+      WHERE (rp.user_id IS NOT NULL OR rp.anon_id IS NOT NULL)
+        ${exclWhere}
+    ),
+    agg AS (
+      SELECT
+        fr.user_id, fr.anon_id,
+        COALESCE(u.display_name, u.first_name, MAX(fr.name)) AS display_name,
+        u.username, u.photo_url,
+        MAX(fr.emoji) AS emoji,
+        (CASE WHEN fr.user_id IS NULL THEN 1 ELSE 0 END) AS is_guest,
+        COUNT(DISTINCT fr.room_id) AS games_together,
+        MAX(fr.joined_at) AS last_seen
+      FROM friends_raw fr
+      LEFT JOIN users u ON u.tg_id = fr.user_id
+      GROUP BY COALESCE('u:'||fr.user_id, 'a:'||fr.anon_id)
+    )
+    SELECT * FROM agg ORDER BY last_seen DESC LIMIT ? OFFSET ?`;
+
+  const totalSql = `
+    WITH me_rooms AS (
+      SELECT DISTINCT room_id FROM room_players WHERE ${meWhere}
+    ),
+    friends_raw AS (
+      SELECT rp.user_id, rp.anon_id
+      FROM room_players rp
+      JOIN me_rooms mr ON mr.room_id = rp.room_id
+      WHERE (rp.user_id IS NOT NULL OR rp.anon_id IS NOT NULL)
+        ${exclWhere}
+    )
+    SELECT COUNT(*) AS n FROM (
+      SELECT 1 FROM friends_raw GROUP BY COALESCE('u:'||user_id, 'a:'||anon_id)
+    )`;
+
+  const [rs, totalRow] = await Promise.all([
+    env.DB.prepare(sql).bind(...meArgs, ...exclArgs, limit, offset).all(),
+    env.DB.prepare(totalSql).bind(...meArgs, ...exclArgs).first(),
+  ]);
+  return corsJson({
+    ok: true,
+    rows: rs.results || [],
+    total: Number(totalRow?.n || 0),
+    limit, offset,
+  });
 }
 
 /* ─── Cards: чтение из БД для фронта ─────────────────────────────────────── */
@@ -1303,13 +1493,13 @@ async function handleCardsRead(request, env) {
   // плюс «нейтральные» (vibes IS NULL или пусто) для базы.
   const rs = vibe
     ? await env.DB.prepare(
-        `SELECT id, type, text, vibes, intensity, meta
+        `SELECT id, type, text, vibes, meta, wr_a, wr_b
          FROM cards WHERE game_id = ? AND approved = 1
            AND (vibes IS NULL OR vibes = '' OR ',' || vibes || ',' LIKE ?)
          ORDER BY RANDOM() LIMIT ?`
       ).bind(gameId, `%,${vibe},%`, limit).all()
     : await env.DB.prepare(
-        `SELECT id, type, text, vibes, intensity, meta
+        `SELECT id, type, text, vibes, meta, wr_a, wr_b
          FROM cards WHERE game_id = ? AND approved = 1
          ORDER BY RANDOM() LIMIT ?`
       ).bind(gameId, limit).all();
@@ -1320,8 +1510,32 @@ async function handleCardsRead(request, env) {
       ...r,
       vibes: r.vibes ? String(r.vibes).split(',').filter(Boolean) : null,
       meta: r.meta ? safeJson(r.meta) : null,
+      wr_a: r.wr_a != null ? Number(r.wr_a) : 0,
+      wr_b: r.wr_b != null ? Number(r.wr_b) : 0,
     })),
   });
+}
+
+/* ─── Would-Rather vote: атомарный инкремент wr_a/wr_b ───────────────────── */
+async function handleWrVote(request, env) {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const cardId = Number(body.card_id);
+    const choice = String(body.choice || '').toUpperCase();
+    if (!Number.isFinite(cardId) || (choice !== 'A' && choice !== 'B')) {
+      return corsJson({ error: 'bad_request' }, 400);
+    }
+    const col = choice === 'A' ? 'wr_a' : 'wr_b';
+    await env.DB.prepare(`UPDATE cards SET ${col} = COALESCE(${col},0) + 1 WHERE id = ?`).bind(cardId).run();
+    const row = await env.DB.prepare(`SELECT wr_a, wr_b FROM cards WHERE id = ?`).bind(cardId).first();
+    return corsJson({
+      ok: true,
+      wr_a: row ? Number(row.wr_a || 0) : 0,
+      wr_b: row ? Number(row.wr_b || 0) : 0,
+    });
+  } catch (e) {
+    return corsJson({ error: 'server_error', detail: String(e?.message || e) }, 500);
+  }
 }
 
 /* ─── Hidden admin: панель управления ────────────────────────────────────── */
@@ -1539,7 +1753,7 @@ async function api(path, init = {}) {
 }
 
 /* ─── known taxonomy ───────────────────────────────────────────────────── */
-const VIBES = ['warmup','funny','spicy','chill','new_people','deep','adult','ultra_adult'];
+const VIBES = ['warmup','funny','family','new_people','deep','teambuilding','cringe','adult','ultra_adult'];
 const GAMES_LIST = []; // заполняется из stats
 const CARD_TYPES_BY_GAME = {}; // { game_id: ['Правда','Действие', ...] }
 function typesForGame(game) {
@@ -1838,10 +2052,10 @@ async function viewDashboard(root) {
 }
 
 /* ─── Cards ────────────────────────────────────────────────────────────── */
-const cardsState = { game: '', vibe: '', type: '', intensity: '', approved: '', q: '', limit: 50, offset: 0, total: 0, rows: [], sel: new Set() };
+const cardsState = { game: '', vibe: '', type: '', q: '', limit: 50, offset: 0, total: 0, rows: [], sel: new Set() };
 async function loadCards() {
   const qs = new URLSearchParams();
-  for (const k of ['game','vibe','type','intensity','approved','q']) {
+  for (const k of ['game','vibe','type','q']) {
     if (cardsState[k]) qs.set(k === 'game' ? 'game_id' : k, cardsState[k]);
   }
   qs.set('limit', cardsState.limit); qs.set('offset', cardsState.offset);
@@ -1868,23 +2082,6 @@ function viewCards(root) {
   typesForGame(cardsState.game).forEach(t => selType.appendChild(h('option', { value: t, selected: t === cardsState.type ? 'selected' : null }, t)));
   filters.appendChild(selType);
 
-  // Интенсивность 1..5 — «мягко → жёстко». Отдельный лейбл, чтобы не путать.
-  const selI = h('select', {
-    title: 'Интенсивность: 1 — мягко · 5 — жёстко',
-    onchange: (e) => { cardsState.intensity = e.target.value; cardsState.offset = 0; refresh(); },
-  });
-  selI.appendChild(h('option', { value: '' }, 'Интенсивность'));
-  ['1 — мягко', '2 — лайт', '3 — средне', '4 — острое', '5 — жёстко'].forEach((label, idx) => {
-    const v = idx + 1;
-    selI.appendChild(h('option', { value: v, selected: String(v) === cardsState.intensity ? 'selected' : null }, label));
-  });
-  filters.appendChild(selI);
-  const selA = h('select', { onchange: (e) => { cardsState.approved = e.target.value; cardsState.offset = 0; refresh(); } });
-  selA.appendChild(h('option', { value: '' }, '— approved —'));
-  selA.appendChild(h('option', { value: '1', selected: cardsState.approved === '1' ? 'selected' : null }, '✓ одобрено'));
-  selA.appendChild(h('option', { value: '0', selected: cardsState.approved === '0' ? 'selected' : null }, '✗ не одобрено'));
-  filters.appendChild(selA);
-
   const search = h('input', { placeholder: 'поиск по тексту…', value: cardsState.q, style: 'flex:1; min-width: 180px;' });
   search.addEventListener('input', (e) => { cardsState.q = e.target.value; });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { cardsState.offset = 0; refresh(); } });
@@ -1898,10 +2095,15 @@ function viewCards(root) {
   const tools = h('div', { class: 'tools' });
   tools.appendChild(h('span', { class: 'muted', id: 'cs-info' }));
   tools.appendChild(h('span', { class: 'spacer', style: 'flex:1' }));
-  tools.appendChild(h('button', { onclick: () => bulkAction('approve') }, '✓ Одобрить'));
-  tools.appendChild(h('button', { onclick: () => bulkAction('unapprove') }, '✗ Снять'));
+  tools.appendChild(h('button', { onclick: () => {
+    const allOnPage = cardsState.rows.every(r => cardsState.sel.has(r.id));
+    if (allOnPage) cardsState.rows.forEach(r => cardsState.sel.delete(r.id));
+    else cardsState.rows.forEach(r => cardsState.sel.add(r.id));
+    drawTable();
+  }}, '☑ Все на странице'));
+  tools.appendChild(h('button', { onclick: () => { cardsState.sel.clear(); drawTable(); } }, '☒ Снять выбор'));
   tools.appendChild(h('span', { class: 'sep' }));
-  tools.appendChild(h('button', { class: 'danger', onclick: () => bulkAction('delete') }, '🗑 Удалить'));
+  tools.appendChild(h('button', { class: 'danger', onclick: () => bulkAction('delete') }, '🗑 Удалить выбранные'));
   root.appendChild(tools);
 
   const tableWrap = h('div', { id: 'cards-table' });
@@ -1934,8 +2136,6 @@ function viewCards(root) {
         h('th', { style: 'width:90px' }, 'type'),
         h('th', {}, 'text'),
         h('th', { style: 'width:180px' }, 'vibes'),
-        h('th', { style: 'width:40px' }, 'I'),
-        h('th', { style: 'width:60px' }, '✓'),
         h('th', { style: 'width:130px' }, ''),
       )),
       h('tbody', {}, cardsState.rows.map(r => cardRow(r, drawTable))),
@@ -1953,12 +2153,26 @@ function viewCards(root) {
   async function bulkAction(action) {
     const ids = [...cardsState.sel];
     if (!ids.length) return toast('Ничего не выбрано', 'err');
-    if (action === 'delete' && !confirm('Удалить ' + ids.length + ' карточек? Это необратимо.')) return;
+    if (action === 'delete') {
+      const ok = await confirmModal('Удалить ' + ids.length + ' карточек?', 'Это необратимо.');
+      if (!ok) return;
+    }
+    const sy = window.scrollY;
     try {
       const r = await api('/api/admin/cards/bulk', { method: 'POST', body: { action, ids } });
-      toast('Готово: ' + (r.deleted || r.updated || 0), 'ok');
+      toast('Удалено: ' + (r.deleted || r.updated || 0), 'ok');
+      // Локально вырезаем удалённые строки, чтобы не дёргать список и не скроллить.
+      const removed = new Set(ids);
+      cardsState.rows = cardsState.rows.filter(r => !removed.has(r.id));
+      cardsState.total = Math.max(0, cardsState.total - ids.length);
       cardsState.sel.clear();
-      refresh();
+      drawTable();
+      // Если страница опустела — подгружаем следующую, но удерживаем скролл.
+      if (!cardsState.rows.length && cardsState.total > 0) {
+        cardsState.offset = Math.max(0, cardsState.offset - cardsState.limit);
+        await loadCards(); drawTable();
+      }
+      requestAnimationFrame(() => window.scrollTo(0, sy));
     } catch {}
   }
 
@@ -1979,25 +2193,58 @@ function cardRow(r, redraw) {
     h('td', {}, (r.vibes || []).length
       ? (r.vibes.map(v => h('span', { class: 'chip' + (v==='adult'||v==='ultra_adult' ? ' adult' : '') }, v)))
       : h('span', { class: 'muted' }, '—')),
-    h('td', { class: 'intensity intensity-' + (r.intensity || 2) }, String(r.intensity || 2)),
-    h('td', {}, r.approved ? h('span', { class: 'chip ok' }, '✓') : h('span', { class: 'chip warn' }, '✗')),
     h('td', { class: 'acts' },
       h('button', { onclick: () => openEditCard(r, redraw) }, '✎'),
       ' ',
       h('button', { onclick: () => duplicateCard(r, redraw) }, '⎘'),
       ' ',
       h('button', { class: 'danger', onclick: async () => {
-        if (!confirm('Удалить #' + r.id + '?')) return;
-        await api('/api/admin/cards/' + r.id, { method: 'DELETE' });
-        toast('Удалено', 'ok'); cardsState.rows = cardsState.rows.filter(x => x.id !== r.id); redraw();
+        const ok = await confirmModal('Удалить #' + r.id + '?', (r.text || '').slice(0, 120));
+        if (!ok) return;
+        const sy = window.scrollY;
+        try {
+          await api('/api/admin/cards/' + r.id, { method: 'DELETE' });
+          toast('Удалено', 'ok');
+          cardsState.rows = cardsState.rows.filter(x => x.id !== r.id);
+          cardsState.sel.delete(r.id);
+          cardsState.total = Math.max(0, cardsState.total - 1);
+          redraw();
+          requestAnimationFrame(() => window.scrollTo(0, sy));
+        } catch {}
       }}, '🗑'),
     ),
   );
   return tr;
 }
 
+/* ─── Кастомный confirm-модал (вместо браузерного, который ломается после
+       галочки "Prevent additional dialogs") ─────────────────────────────── */
+function confirmModal(title, hint) {
+  return new Promise((resolve) => {
+    const bg = h('div', { class: 'modal-bg' });
+    let done = false;
+    const finish = (val) => { if (done) return; done = true; bg.remove(); resolve(val); };
+    bg.onclick = (e) => { if (e.target === bg) finish(false); };
+    const modal = h('div', { class: 'modal', style: 'max-width: 420px' },
+      h('h3', { style: 'margin-top:0' }, title),
+      hint ? h('p', { class: 'muted', style: 'margin: 0 0 14px; white-space: pre-wrap; word-break: break-word' }, hint) : null,
+      h('div', { class: 'row', style: 'justify-content: flex-end; gap: 8px;' },
+        h('button', { onclick: () => finish(false) }, 'Отмена'),
+        h('button', { class: 'danger', onclick: () => finish(true) }, 'Удалить'),
+      ),
+    );
+    bg.appendChild(modal); document.body.appendChild(bg);
+    // Enter = подтвердить, Esc = отмена
+    const onKey = (e) => {
+      if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); finish(false); }
+      if (e.key === 'Enter')  { document.removeEventListener('keydown', onKey); finish(true);  }
+    };
+    document.addEventListener('keydown', onKey);
+  });
+}
+
 async function duplicateCard(r, redraw) {
-  const payload = { game_id: r.game_id, type: r.type, text: r.text + ' (копия)', vibes: r.vibes, intensity: r.intensity, meta: r.meta, pack_id: r.pack_id, approved: !!r.approved };
+  const payload = { game_id: r.game_id, type: r.type, text: r.text + ' (копия)', vibes: r.vibes, meta: r.meta, pack_id: r.pack_id, approved: !!r.approved };
   await api('/api/admin/cards', { method: 'POST', body: payload });
   toast('Создана копия', 'ok');
   // обновим список с нуля
@@ -2012,7 +2259,7 @@ function openCreateCard() { openCardModal(null); }
 function openEditCard(r) { openCardModal(r); }
 function openCardModal(r) {
   const isEdit = !!r;
-  const data = r ? { ...r, vibes: (r.vibes || []).join(',') } : { game_id: cardsState.game || '', type: '', text: '', vibes: cardsState.vibe && cardsState.vibe !== '__none__' ? cardsState.vibe : '', intensity: 2, approved: true, meta: null, pack_id: null };
+  const data = r ? { ...r, vibes: (r.vibes || []).join(',') } : { game_id: cardsState.game || '', type: '', text: '', vibes: cardsState.vibe && cardsState.vibe !== '__none__' ? cardsState.vibe : '', approved: true, meta: null, pack_id: null };
   const inp = (k, type = 'input', extra = {}) => {
     const el = h(type === 'textarea' ? 'textarea' : type, { value: data[k] ?? '', ...extra });
     el.oninput = (e) => data[k] = e.target.value;
@@ -2020,8 +2267,6 @@ function openCardModal(r) {
     return el;
   };
   const metaTa = h('textarea', { placeholder: '{} или пусто' }, data.meta ? JSON.stringify(data.meta, null, 2) : '');
-  const approvedCb = h('input', { type: 'checkbox' }); approvedCb.checked = !!data.approved;
-  const intensityIn = h('input', { type: 'number', min: 1, max: 5, value: data.intensity || 2 });
   const gameIn = h('input', { value: data.game_id || '' });
   const typeIn = h('input', { value: data.type || '' });
   const textTa = h('textarea', {}, data.text || '');
@@ -2033,8 +2278,8 @@ function openCardModal(r) {
   modal.appendChild(h('h3', {}, isEdit ? 'Редактировать #' + r.id : 'Новая карточка'));
   const rows = [
     ['game_id *', gameIn], ['type', typeIn], ['text *', textTa],
-    ['vibes', vibesIn], ['intensity', intensityIn],
-    ['approved', approvedCb], ['pack_id', packIn], ['meta (JSON)', metaTa],
+    ['vibes', vibesIn],
+    ['pack_id', packIn], ['meta (JSON)', metaTa],
   ];
   rows.forEach(([l, el]) => modal.appendChild(h('div', { class: 'form-row' }, h('label', {}, l), el)));
   const row = h('div', { class: 'row', style: 'justify-content: flex-end; gap: 8px; margin-top: 12px;' });
@@ -2045,8 +2290,7 @@ function openCardModal(r) {
       type: typeIn.value.trim() || null,
       text: textTa.value.trim(),
       vibes: vibesIn.value.split(',').map(s => s.trim()).filter(Boolean),
-      intensity: Number(intensityIn.value) || 2,
-      approved: approvedCb.checked,
+      approved: true,
       pack_id: packIn.value.trim() || null,
     };
     if (metaTa.value.trim()) {
@@ -2068,7 +2312,7 @@ function openCardModal(r) {
 
 function openBulkImport() {
   const bg = h('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
-  const ta = h('textarea', { placeholder: '[{"game_id":"truth","type":"Правда","text":"…","vibes":["warmup"],"intensity":2}, …]', style: 'min-height:300px' });
+  const ta = h('textarea', { placeholder: '[{"game_id":"truth","type":"Правда","text":"…","vibes":["warmup"]}, …]', style: 'min-height:300px' });
   const modal = h('div', { class: 'modal' },
     h('h3', {}, 'Импорт JSON-массива'),
     h('p', { class: 'muted' }, 'Каждый элемент — карточка. Обязательно: game_id, text. По умолчанию approved=true, source="admin_bulk".'),
@@ -2186,8 +2430,10 @@ async function viewGames(root) {
       wrap.appendChild(h('table', {},
         h('thead', {}, h('tr', {},
           h('th', {}, ''), h('th', {}, 'id'), h('th', {}, 'title'),
-          h('th', {}, 'категория'), h('th', {}, 'simple'),
-          h('th', {}, 'active'), h('th', {}, 'карт'),
+          h('th', {}, 'категория'),
+          h('th', { title: 'Видна в приложении' }, 'активна'),
+          h('th', { title: 'Показывается в блоке "Популярные" на главной' }, 'популярная'),
+          h('th', {}, 'карт'),
         )),
         h('tbody', {}, d.rows.map(g => makeGameRow(g, refresh))),
       ));
@@ -2201,18 +2447,18 @@ function makeGameRow(g, refresh) {
     await api('/api/admin/games/' + g.id, { method: 'PATCH', body: { active: activeCb.checked } });
     toast(activeCb.checked ? 'Игра видна в приложении' : 'Игра скрыта', 'ok');
   };
-  const simpleCb = h('input', { type: 'checkbox' }); simpleCb.checked = g.simple;
-  simpleCb.onchange = async () => {
-    await api('/api/admin/games/' + g.id, { method: 'PATCH', body: { simple: simpleCb.checked } });
-    toast('Сохранено', 'ok'); refresh();
+  const popCb = h('input', { type: 'checkbox' }); popCb.checked = !!g.popular;
+  popCb.onchange = async () => {
+    await api('/api/admin/games/' + g.id, { method: 'PATCH', body: { popular: popCb.checked } });
+    toast(popCb.checked ? 'Игра добавлена в популярные' : 'Убрана из популярных', 'ok');
   };
   return h('tr', {},
     h('td', {}, h('span', { style: 'font-size:20px' }, g.emoji)),
     h('td', { class: 'id' }, g.id),
     h('td', { class: 'type' }, g.title),
     h('td', { class: 'muted' }, g.category),
-    h('td', {}, simpleCb),
     h('td', {}, activeCb),
+    h('td', {}, popCb),
     h('td', { class: 'intensity intensity-2' }, String(g.cards_count || 0)),
   );
 }
@@ -2289,14 +2535,85 @@ function openUserModal(u, refresh) {
     puIn.value = d.toISOString().slice(0,16);
   }}, '+1 месяц');
   const revokeBtn = h('button', { class: 'danger', onclick: () => puIn.value = '' }, 'Снять');
+
   const bg = h('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
   const modal = h('div', { class: 'modal' });
   modal.appendChild(h('h3', {}, '@' + (u.username || u.tg_id) + ' · tg_id=' + u.tg_id));
   [['display_name', dnIn], ['emoji', emIn], ['default_vibe', vbIn],
    ['premium до', h('div', { class: 'row' }, puIn, grantBtn, revokeBtn)],
   ].forEach(([l, el]) => modal.appendChild(h('div', { class: 'form-row' }, h('label', {}, l), el)));
+
+  // ── Премиум-подписка (плашка с быстрыми действиями) ──
+  const premStatus = h('span', { class: 'chip ' + (u.premium_until && u.premium_until > Date.now() ? 'ok' : 'muted') },
+    u.premium_until && u.premium_until > Date.now() ? '⭐ Premium до ' + new Date(u.premium_until).toLocaleDateString('ru-RU') : 'Премиум не активен');
+  const premBlock = h('div', { class: 'form-row' },
+    h('label', {}, 'PartyUp Premium'),
+    h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;align-items:center' },
+      premStatus,
+      h('button', { onclick: async () => {
+        await api('/api/admin/users/' + u.tg_id + '/premium', { method: 'POST', body: { days: 30 } });
+        toast('Выдано +30 дней', 'ok'); bg.remove(); refresh();
+      }}, '+30 дней'),
+      h('button', { onclick: async () => {
+        await api('/api/admin/users/' + u.tg_id + '/premium', { method: 'POST', body: { days: 365 } });
+        toast('Выдано +1 год', 'ok'); bg.remove(); refresh();
+      }}, '+1 год'),
+      h('button', { class: 'danger', onclick: async () => {
+        await api('/api/admin/users/' + u.tg_id + '/premium', { method: 'POST', body: { revoke: true } });
+        toast('Премиум снят', 'ok'); bg.remove(); refresh();
+      }}, 'Снять'),
+    ),
+  );
+  modal.appendChild(premBlock);
+
+  // ── Паки юзера ──
+  const packsBlock = h('div', { class: 'form-row' });
+  const packsLbl = h('label', {}, 'Паки');
+  const packsList = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;flex-direction:column;align-items:stretch' });
+  const grantSelect = h('select', {});
+  const PACK_OPTIONS = [
+    { id: 'pack_cringe', label: 'Кринж 🤡 (99⭐)' },
+    { id: 'pack_teambuilding', label: 'Тимбилдинг 💼 (99⭐)' },
+    { id: 'pack_ultra_adult', label: '24+ 💋 (149⭐)' },
+  ];
+  PACK_OPTIONS.forEach(p => grantSelect.appendChild(h('option', { value: p.id }, p.label)));
+  const grantPackBtn = h('button', { class: 'primary', onclick: async () => {
+    const pid = grantSelect.value;
+    try {
+      await api('/api/admin/users/' + u.tg_id + '/packs', { method: 'POST', body: { packId: pid } });
+      toast('Пак выдан', 'ok'); await reloadPacks();
+    } catch {}
+  }}, '+ Выдать');
+  async function reloadPacks() {
+    packsList.innerHTML = '';
+    try {
+      const r = await api('/api/admin/users/' + u.tg_id + '/packs');
+      const rows = r.rows || [];
+      if (!rows.length) packsList.appendChild(h('div', { class: 'muted' }, 'Паков пока нет'));
+      rows.forEach(p => {
+        const opt = PACK_OPTIONS.find(x => x.id === p.pack_id);
+        const row = h('div', { class: 'row', style: 'justify-content:space-between;padding:6px 10px;background:rgba(167,139,250,0.06);border-radius:8px' },
+          h('span', {}, (opt?.label || p.pack_id) + ' · ' + (p.source || '—')),
+          h('button', { class: 'danger', style: 'padding:4px 10px;font-size:11px',
+            onclick: async () => {
+              await api('/api/admin/users/' + u.tg_id + '/packs/' + p.pack_id, { method: 'DELETE' });
+              toast('Снят', 'ok'); await reloadPacks();
+            } }, 'Снять'),
+        );
+        packsList.appendChild(row);
+      });
+    } catch {}
+  }
+  packsBlock.appendChild(packsLbl);
+  packsBlock.appendChild(h('div', { style: 'flex:1' },
+    packsList,
+    h('div', { class: 'row', style: 'gap:6px;margin-top:8px' }, grantSelect, grantPackBtn),
+  ));
+  modal.appendChild(packsBlock);
+  reloadPacks();
+
   modal.appendChild(h('div', { class: 'row', style: 'justify-content: flex-end; gap: 8px; margin-top: 12px;' },
-    h('button', { onclick: () => bg.remove() }, 'Отмена'),
+    h('button', { onclick: () => bg.remove() }, 'Закрыть'),
     h('button', { class: 'primary', onclick: async () => {
       const body = {
         display_name: dnIn.value.trim() || null,
@@ -2661,6 +2978,18 @@ async function handleAdminStats(request, env) {
        GROUP BY type`
     ).bind(weekAgo).all(),
   ]);
+  // Фильтруем агрегаты по АКТУАЛЬНОМУ active-каталогу — удалённые
+  // (или отключённые) игры/вайбы не должны болтаться на дашборде.
+  const [effGames, effVibes] = await Promise.all([
+    getEffectiveGames(env), getEffectiveVibes(env),
+  ]);
+  const activeGameIds = new Set(effGames.filter(g => g.active).map(g => g.id));
+  const activeVibeIds = new Set(effVibes.filter(v => v.active).map(v => v.id));
+  const filterByGame  = arr => (arr || []).filter(r => r.game_id && activeGameIds.has(r.game_id));
+  const filterByVibe  = arr => (arr || []).filter(r => r.vibe && activeVibeIds.has(r.vibe));
+  const filterMatrix  = arr => (arr || []).filter(r => activeGameIds.has(r.game_id)
+    && (!r.vibes || r.vibes === '' || String(r.vibes).split(',').some(v => activeVibeIds.has(v.trim()))));
+
   return adminJson({
     ok: true,
     counters: {
@@ -2674,9 +3003,9 @@ async function handleAdminStats(request, env) {
       activeRooms: rooms?.n || 0,
       eventsTotal: eventsTotal?.n || 0,
     },
-    topGames: topGames.results || [],
-    topVibes: topVibes.results || [],
-    byGameVibe: byGameVibe.results || [],
+    topGames: filterByGame(topGames.results),
+    topVibes: filterByVibe(topVibes.results),
+    byGameVibe: filterMatrix(byGameVibe.results),
     daily: daily.results || [],
     recentSessions: recentSessions.results || [],
     dauByDay: dauByDay.results || [],
@@ -2719,8 +3048,6 @@ async function handleAdminCards(request, env, method, idStr) {
     }
     const type = url.searchParams.get('type');
     if (type) { where.push('type = ?'); args.push(type); }
-    const intensity = url.searchParams.get('intensity');
-    if (intensity) { where.push('intensity = ?'); args.push(Number(intensity)); }
     const approved = url.searchParams.get('approved');
     if (approved === '0' || approved === '1') { where.push('approved = ?'); args.push(Number(approved)); }
     const q = url.searchParams.get('q');
@@ -2731,7 +3058,7 @@ async function handleAdminCards(request, env, method, idStr) {
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const [rs, total] = await Promise.all([
       env.DB.prepare(
-        `SELECT id, pack_id, game_id, type, text, vibes, intensity, meta, approved, source, author_user_id, created_at
+        `SELECT id, pack_id, game_id, type, text, vibes, meta, approved, source, author_user_id, created_at
          FROM cards ${whereSql} ORDER BY ${sort} LIMIT ? OFFSET ?`
       ).bind(...args, limit, offset).all(),
       env.DB.prepare(`SELECT COUNT(*) AS n FROM cards ${whereSql}`).bind(...args).first(),
@@ -2752,15 +3079,14 @@ async function handleAdminCards(request, env, method, idStr) {
     const body = await request.json().catch(() => ({}));
     if (!body.game_id || !body.text) return adminJson({ error: 'missing_fields' }, 400);
     const r = await env.DB.prepare(
-      `INSERT INTO cards (pack_id, game_id, type, text, vibes, intensity, meta, source, author_user_id, approved, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO cards (pack_id, game_id, type, text, vibes, meta, source, author_user_id, approved, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       body.pack_id || null,
       String(body.game_id),
       body.type ? String(body.type) : null,
       String(body.text),
       _vibesToCsv(body.vibes),
-      Number(body.intensity) || 2,
       body.meta ? JSON.stringify(body.meta) : null,
       body.source ? String(body.source) : 'admin',
       Number.isInteger(body.author_user_id) ? body.author_user_id : guard.userId,
@@ -2777,7 +3103,6 @@ async function handleAdminCards(request, env, method, idStr) {
     for (const k of stringFields) {
       if (k in body) { sets.push(`${k} = ?`); args.push(body[k] == null ? null : String(body[k])); }
     }
-    if ('intensity' in body) { sets.push('intensity = ?'); args.push(Number(body.intensity) || 2); }
     if ('approved' in body) { sets.push('approved = ?'); args.push(body.approved ? 1 : 0); }
     if ('vibes' in body) { sets.push('vibes = ?'); args.push(_vibesToCsv(body.vibes)); }
     if ('meta' in body) { sets.push('meta = ?'); args.push(body.meta ? JSON.stringify(body.meta) : null); }
@@ -2809,15 +3134,14 @@ async function handleAdminCardsBulk(request, env) {
     for (const it of items) {
       if (!it || !it.game_id || !it.text) continue;
       stmts.push(env.DB.prepare(
-        `INSERT INTO cards (pack_id, game_id, type, text, vibes, intensity, meta, source, author_user_id, approved, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO cards (pack_id, game_id, type, text, vibes, meta, source, author_user_id, approved, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         it.pack_id || null,
         String(it.game_id),
         it.type ? String(it.type) : null,
         String(it.text),
         _vibesToCsv(it.vibes),
-        Number(it.intensity) || 2,
         it.meta ? JSON.stringify(it.meta) : null,
         it.source ? String(it.source) : 'admin_bulk',
         Number.isInteger(it.author_user_id) ? it.author_user_id : guard.userId,
@@ -2828,6 +3152,21 @@ async function handleAdminCardsBulk(request, env) {
     if (!stmts.length) return adminJson({ error: 'no_valid_items' }, 400);
     await env.DB.batch(stmts);
     return adminJson({ ok: true, inserted: stmts.length });
+  }
+
+  // Массовое обновление текста по {id, text}. Используется ревью-агентами.
+  // Идёт ПЕРЕД ids-валидацией, т.к. экшен принимает items, не ids.
+  if (action === 'update_texts') {
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) return adminJson({ error: 'no_items' }, 400);
+    const stmts = [];
+    for (const it of items) {
+      if (!Number.isInteger(it?.id) || typeof it?.text !== 'string') continue;
+      stmts.push(env.DB.prepare(`UPDATE cards SET text = ? WHERE id = ?`).bind(it.text, it.id));
+    }
+    if (!stmts.length) return adminJson({ error: 'no_valid_items' }, 400);
+    await env.DB.batch(stmts);
+    return adminJson({ ok: true, updated: stmts.length });
   }
 
   const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
@@ -2850,10 +3189,8 @@ async function handleAdminCardsBulk(request, env) {
     return adminJson({ ok: true, updated: ids.length });
   }
   if (action === 'set_intensity') {
-    const intensity = Number(body.intensity) || 2;
-    await env.DB.prepare(`UPDATE cards SET intensity = ? WHERE id IN (${placeholders})`)
-      .bind(intensity, ...ids).run();
-    return adminJson({ ok: true, updated: ids.length });
+    // intensity-колонка удалена; экшен оставлен как no-op для обратной совместимости
+    return adminJson({ ok: true, updated: 0, note: 'intensity_removed' });
   }
   return adminJson({ error: 'unknown_action' }, 400);
 }
@@ -2879,23 +3216,18 @@ const VIBES_CATALOG = [
 // Каталог игр. simple = «показывается в основном списке». Параметры
 // игры (кол-во карт по умолчанию, есть ли timer и т.д.) — для будущего
 // расширения, сейчас просто метаданные.
+// defaultPopular — игра отображается на главной как "популярная".
+// Можно переопределить через games_meta.popular (0/1) из админки.
 const GAMES_CATALOG = [
-  { id: 'truth',        title: 'Правда или действие',     emoji: '🎯', defaultSimple: true,  category: 'действия'   },
-  { id: 'never',        title: 'Я никогда не…',           emoji: '🙅', defaultSimple: true,  category: 'вопросы'    },
-  { id: 'whoofus',      title: 'Кто из нас',              emoji: '👥', defaultSimple: true,  category: 'голосование' },
-  { id: 'most',         title: 'Кто скорее всего',        emoji: '📊', defaultSimple: true,  category: 'голосование' },
-  { id: 'five',         title: '5 секунд',                emoji: '⏱️', defaultSimple: true,  category: 'скорость'   },
-  { id: 'associations', title: 'Ассоциации',              emoji: '🧠', defaultSimple: true,  category: 'слова'      },
-  { id: 'spy',          title: 'Шпион',                   emoji: '🕵️', defaultSimple: false, category: 'детектив'  },
-  { id: 'crocodile',    title: 'Крокодил',                emoji: '🐊', defaultSimple: false, category: 'объяснялки' },
-  { id: 'alias',        title: 'Элиас',                   emoji: '🗣️', defaultSimple: false, category: 'объяснялки' },
-  { id: 'mafia',        title: 'Мафия',                   emoji: '🎭', defaultSimple: false, category: 'детектив'   },
-  { id: 'bunker',       title: 'Бункер',                  emoji: '☢️', defaultSimple: false, category: 'ролевые'    },
-  { id: 'memes',        title: 'Мем-батл',                emoji: '😂', defaultSimple: false, category: 'мемы'       },
-  { id: 'whoami',       title: 'Кто я?',                  emoji: '❓', defaultSimple: false, category: 'угадайка'   },
-  { id: 'fact',         title: 'Угадай факт о друге',     emoji: '🔍', defaultSimple: false, category: 'угадайка'   },
-  { id: 'hot_seat',     title: 'Горячий стул',            emoji: '🔥', defaultSimple: false, category: 'вопросы'    },
-  { id: 'taboo',        title: 'Табу',                    emoji: '🚫', defaultSimple: false, category: 'объяснялки' },
+  { id: 'truth',        title: 'Правда или действие', emoji: '🎯', category: 'действия',   defaultPopular: true  },
+  { id: 'never',        title: 'Я никогда не…',       emoji: '🙅', category: 'вопросы',    defaultPopular: true  },
+  { id: 'whoofus',      title: 'Кто из нас',          emoji: '👥', category: 'голосование', defaultPopular: true },
+  { id: 'five',         title: '5 секунд',            emoji: '⏱️', category: 'скорость',   defaultPopular: true  },
+  { id: 'associations', title: 'Ассоциации',          emoji: '🧠', category: 'слова',      defaultPopular: false },
+  { id: 'would_rather', title: 'Что выберешь?',       emoji: '⚖️', category: 'дилеммы',    defaultPopular: true  },
+  { id: 'crocodile',    title: 'Крокодил',            emoji: '🐊', category: 'объяснялки', defaultPopular: false },
+  { id: 'alias',        title: 'Элиас',               emoji: '🗣️', category: 'объяснялки', defaultPopular: false },
+  { id: 'whoami',       title: 'Кто я?',              emoji: '❓', category: 'угадайка',   defaultPopular: false },
 ];
 
 // Ленивая инициализация табличек overrides — без миграции, на on-demand.
@@ -2906,9 +3238,11 @@ async function ensureMetaTables(env) {
       label TEXT, hint TEXT, updated_at INTEGER
     )`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS games_meta (
-      id TEXT PRIMARY KEY, active INTEGER DEFAULT 1, simple INTEGER, updated_at INTEGER
+      id TEXT PRIMARY KEY, active INTEGER DEFAULT 1, simple INTEGER, popular INTEGER, updated_at INTEGER
     )`),
   ]);
+  // Идемпотентная миграция: добавляем popular колонку, если игра старая.
+  try { await env.DB.prepare(`ALTER TABLE games_meta ADD COLUMN popular INTEGER`).run(); } catch {}
 }
 
 async function getEffectiveVibes(env) {
@@ -2943,7 +3277,7 @@ async function getEffectiveGames(env) {
       title: g.title,
       emoji: g.emoji,
       category: g.category,
-      simple: o.simple != null ? !!o.simple : g.defaultSimple,
+      popular: o.popular != null ? !!o.popular : !!g.defaultPopular,
       active: o.active != null ? !!o.active : true,
     };
   });
@@ -3033,16 +3367,16 @@ async function handleAdminGames(request, env, method, idStr) {
     await ensureMetaTables(env);
     const ts = now();
     await env.DB.prepare(
-      `INSERT INTO games_meta (id, active, simple, updated_at)
+      `INSERT INTO games_meta (id, active, popular, updated_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
-         active = COALESCE(excluded.active, games_meta.active),
-         simple = COALESCE(excluded.simple, games_meta.simple),
+         active  = COALESCE(excluded.active, games_meta.active),
+         popular = COALESCE(excluded.popular, games_meta.popular),
          updated_at = excluded.updated_at`
     ).bind(
       idStr,
-      'active' in body ? (body.active ? 1 : 0) : null,
-      'simple' in body ? (body.simple ? 1 : 0) : null,
+      'active'  in body ? (body.active  ? 1 : 0) : null,
+      'popular' in body ? (body.popular ? 1 : 0) : null,
       ts,
     ).run();
     return adminJson({ ok: true });
@@ -3051,6 +3385,61 @@ async function handleAdminGames(request, env, method, idStr) {
 }
 
 /* ─── Admin: users (read + limited edit) ─────────────────────────────────── */
+// ─── Admin: управление паками юзера ──────────────────────────────────────
+async function handleAdminUserPacks(request, env, method, userId, packId) {
+  const guard = await requireAdmin(request, env);
+  if (!guard.ok) return guard.response;
+  if (!Number.isFinite(userId)) return adminJson({ error: 'bad_user' }, 400);
+
+  if (method === 'GET') {
+    const rs = await env.DB.prepare(
+      `SELECT pack_id, source, acquired_at FROM user_packs WHERE user_id = ?
+       ORDER BY acquired_at DESC`
+    ).bind(userId).all();
+    return adminJson({ ok: true, rows: rs.results || [] });
+  }
+  if (method === 'POST') {
+    // Выдать пак вручную. Body: { packId: 'pack_xxx' } или из URL.
+    const body = packId ? { packId } : (await request.json().catch(() => ({})));
+    const pid = body.packId || packId;
+    if (!pid || !PREMIUM_PACKS[pid]) return adminJson({ error: 'bad_pack' }, 400);
+    await ensurePackExists(env, pid);
+    await env.DB.prepare(
+      `INSERT INTO user_packs (user_id, pack_id, source, acquired_at)
+       VALUES (?, ?, 'admin', ?)
+       ON CONFLICT(user_id, pack_id) DO UPDATE SET source = 'admin'`
+    ).bind(userId, pid, now()).run();
+    return adminJson({ ok: true, granted: pid });
+  }
+  if (method === 'DELETE' && packId) {
+    await env.DB.prepare(`DELETE FROM user_packs WHERE user_id = ? AND pack_id = ?`)
+      .bind(userId, packId).run();
+    return adminJson({ ok: true, revoked: packId });
+  }
+  return adminJson({ error: 'method_not_allowed' }, 405);
+}
+
+// ─── Admin: выдать/снять PartyUp Premium ────────────────────────────────
+// Body: { days: 30 }  → продлевает на N дней от max(now, premium_until)
+//       { revoke: true } → сбрасывает premium_until в null
+async function handleAdminGrantPremium(request, env, userId) {
+  const guard = await requireAdmin(request, env);
+  if (!guard.ok) return guard.response;
+  if (!Number.isFinite(userId)) return adminJson({ error: 'bad_user' }, 400);
+  const body = await request.json().catch(() => ({}));
+  if (body.revoke) {
+    await env.DB.prepare(`UPDATE users SET premium_until = NULL WHERE tg_id = ?`).bind(userId).run();
+    return adminJson({ ok: true, premium_until: null });
+  }
+  const days = Math.max(1, Math.min(3650, Number(body.days || 30)));
+  const u = await env.DB.prepare(`SELECT premium_until FROM users WHERE tg_id = ?`).bind(userId).first();
+  const ts = now();
+  const base = (u?.premium_until && Number(u.premium_until) > ts) ? Number(u.premium_until) : ts;
+  const until = base + days * 86400000;
+  await env.DB.prepare(`UPDATE users SET premium_until = ? WHERE tg_id = ?`).bind(until, userId).run();
+  return adminJson({ ok: true, premium_until: until });
+}
+
 async function handleAdminUsers(request, env, method, idStr) {
   const guard = await requireAdmin(request, env);
   if (!guard.ok) return guard.response;
@@ -3326,6 +3715,32 @@ const PREMIUM_PACKS = {
   pack_ultra_adult:  { title: '24+ 💋',         description: 'Самые откровенные карточки. Без цензуры.', price_stars: 149, vibe: 'ultra_adult' },
 };
 
+// Подписка PartyUp Premium: 199⭐ (~300 ₽), 30 дней, разблокирует ВСЕ паки
+// автоматически (не как отдельный пак — а через users.premium_until поле).
+const PREMIUM_SUBSCRIPTION = {
+  id: 'premium_30d',
+  title: 'PartyUp Premium',
+  description: 'Все паки сразу: Кринж, Тимбилдинг, 24+, и любые будущие. 30 дней.',
+  price_stars: 199,
+  duration_days: 30,
+};
+
+// Утилита: проверить активную подписку и вернуть все паки, к которым у юзера
+// есть доступ (купленные + автоматические из подписки).
+async function getOwnedPacks(env, userId) {
+  if (!userId) return [];
+  const direct = await env.DB.prepare(
+    `SELECT pack_id FROM user_packs WHERE user_id = ?`
+  ).bind(userId).all();
+  const owned = new Set((direct.results || []).map(r => r.pack_id));
+  const u = await env.DB.prepare('SELECT premium_until FROM users WHERE tg_id = ?').bind(userId).first();
+  if (u?.premium_until && Number(u.premium_until) > now()) {
+    // Премиум активен — все premium-паки доступны.
+    Object.keys(PREMIUM_PACKS).forEach(p => owned.add(p));
+  }
+  return [...owned];
+}
+
 async function ensurePackExists(env, packId) {
   const def = PREMIUM_PACKS[packId];
   if (!def) return null;
@@ -3342,8 +3757,27 @@ async function handleCreateInvoice(request, env) {
   const body = await request.json().catch(() => ({}));
   const { userId } = await resolveCaller(request, env);
   if (!userId) return corsJson({ error: 'auth_required' }, 401);
+
+  // ── Подписка PartyUp Premium (30 дней) ────────────────────────────
+  if (body.subscription === PREMIUM_SUBSCRIPTION.id) {
+    const sub = PREMIUM_SUBSCRIPTION;
+    await env.DB.prepare(
+      `INSERT INTO purchases (user_id, item_type, item_id, stars, status, created_at)
+       VALUES (?, 'subscription', ?, ?, 'pending', ?)`
+    ).bind(userId, sub.id, sub.price_stars, now()).run();
+    const inv = await tg(env, 'createInvoiceLink', {
+      title: sub.title,
+      description: sub.description,
+      payload: `sub:${sub.id}:${userId}`,
+      currency: 'XTR',
+      prices: [{ label: sub.title, amount: sub.price_stars }],
+    });
+    if (!inv?.ok) return corsJson({ error: 'invoice_failed', detail: inv }, 500);
+    return corsJson({ ok: true, invoiceUrl: inv.result });
+  }
+
+  // ── Отдельный пак ─────────────────────────────────────────────────
   if (!body.packId) return corsJson({ error: 'missing_pack' }, 400);
-  // Ленивая инициализация: если пак известен в реестре, но ещё не в D1 — заводим.
   await ensurePackExists(env, body.packId);
   const pack = await env.DB.prepare('SELECT * FROM packs WHERE id = ?').bind(body.packId).first();
   if (!pack) return corsJson({ error: 'pack_not_found' }, 404);
@@ -3354,7 +3788,6 @@ async function handleCreateInvoice(request, env) {
      VALUES (?, 'pack', ?, ?, 'pending', ?)`
   ).bind(userId, pack.id, pack.price_stars, now()).run();
 
-  // создаём ссылку на счёт в TG Stars
   const inv = await tg(env, 'createInvoiceLink', {
     title: pack.title || 'PartyUp Pack',
     description: pack.description || 'Премиум-пак карточек',
@@ -3406,6 +3839,7 @@ export default {
     if (url.pathname === '/api/leaderboard' && method === 'GET') return handleLeaderboard(request, env);
     if (url.pathname === '/api/friends' && method === 'GET') return handleFriends(request, env);
     if (url.pathname === '/api/cards' && method === 'GET') return handleCardsRead(request, env);
+    if (url.pathname === '/api/wr/vote' && method === 'POST') return handleWrVote(request, env);
     // Vault: поддерживаем GET и HEAD, со слэшем и без, плюс legacy редирект.
     if ((url.pathname === VAULT_PATH || url.pathname === VAULT_PATH + '/') &&
         (method === 'GET' || method === 'HEAD')) {
@@ -3442,6 +3876,16 @@ export default {
     {
       const m = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
       if (m && method === 'PATCH') return handleAdminUsers(request, env, method, m[1]);
+    }
+    // Управление паками юзера: GET — список, POST — выдать, DELETE — отозвать
+    {
+      const m = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/packs(?:\/([^/]+))?$/);
+      if (m) return handleAdminUserPacks(request, env, method, Number(m[1]), m[2] || null);
+    }
+    // Грант премиум-подписки на N дней (по умолчанию 30) или снятие.
+    {
+      const m = url.pathname.match(/^\/api\/admin\/users\/(\d+)\/premium$/);
+      if (m && method === 'POST') return handleAdminGrantPremium(request, env, Number(m[1]));
     }
     if (url.pathname === ADMIN_PATH + '/sessions' && method === 'GET') return handleAdminSessions(request, env);
     if (url.pathname === ADMIN_PATH + '/events' && method === 'GET') return handleAdminEvents(request, env);
