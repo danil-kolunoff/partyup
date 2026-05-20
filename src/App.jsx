@@ -4197,7 +4197,7 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
                   <PlayerAvatar player={p} auth={auth} myId={myId} size={40}
                     onClick={(e) => { e?.stopPropagation?.(); onAvatarClick?.(p) }}/>
                   <span className="player-vote-name">{p.name}</span>
-                  {hasVoted && <span className="player-vote-status" title="Уже проголосовал">✓</span>}
+                  {hasVoted && <span className="player-vote-status-text">проголосовал</span>}
                   {isMyChoice && <CircleCheck size={20} className="player-vote-check"/>}
                 </button>
               )
@@ -4222,15 +4222,8 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
                 </div>
               ))}
             </div>
-            <div className="vote-detail-list">
-              {players.map(p => (
-                <div key={p.id} className="vote-detail-row">
-                  <span className="vote-detail-from">{p.name}</span>
-                  <ArrowLeft size={11} style={{transform:'rotate(180deg)'}}/>
-                  <span className="vote-detail-to">{players.find(t => t.id === votes[p.id])?.name || '—'}</span>
-                </div>
-              ))}
-            </div>
+            {/* Детальный список «кто за кого» убран по запросу — оставляем
+                только победителей и количество голосов. */}
           </div>
           {(isHost || players.length === 1) ? (
             <button className="btn-primary no-pulse mt-16"

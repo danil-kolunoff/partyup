@@ -3689,12 +3689,22 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   box-shadow: 0 4px 14px var(--accent-glow);
 }
 .player-vote-card.is-faded { opacity: 0.55; }
-.player-vote-name { flex: 1; font-weight: 600; font-size: 15px; }
+/* Имя — естественной ширины, чтобы «проголосовал» вставал прямо рядом, а не
+   улетал в правый край карточки. CircleCheck (свой выбор) уходит вправо
+   через margin-left:auto. */
+.player-vote-name { font-weight: 600; font-size: 15px; }
 .player-vote-status {
   margin-left: auto;
   font-size: 13px; color: var(--accent-2); font-weight: 700;
 }
-.player-vote-check { color: var(--accent-2); }
+/* Текстовый индикатор «проголосовал» возле имени — приглушённый, без акцента. */
+.player-vote-status-text {
+  font-size: 11px; font-weight: 500;
+  color: var(--muted); opacity: 0.55;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.player-vote-check { color: var(--accent-2); margin-left: auto; }
 
 .vote-winners-list {
   display: flex; flex-direction: column; gap: 10px;
@@ -3712,18 +3722,6 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   font-size: 12px; color: var(--muted); font-weight: 700;
   white-space: nowrap;
 }
-.vote-detail-list {
-  display: flex; flex-direction: column; gap: 4px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-.vote-detail-row {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 12px; color: var(--muted);
-}
-.vote-detail-from { font-weight: 600; }
-.vote-detail-to { color: var(--text); }
-
 /* ─── Welcome modal v2 — hero + tagline + sub-note ─────────────────────── */
 .welcome-modal-v2 { padding: 22px 22px 22px; position: relative; overflow: hidden; }
 .welcome-hero {
