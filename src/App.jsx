@@ -286,8 +286,23 @@ export default function App() {
   // передают onBurst, в новом дизайне он просто перенаправляет в bnav-точку).
   const burstFromEvent = burstFromVibeBtn
   const picker = pickerRaw
+  // ── vibe-lock guard ──────────────────────────────────────────────────────
+  // Логика: как только пользователь зашёл в лобби или активная mp-комната
+  // существует — вайб ЗАМОРОЖЕН до конца этой партии. deck зафиксирован под
+  // исходный вайб, и любая смена ведёт к рассинхрону карточек между игроками
+  // (mp) или к выпадению из «обещанного» вайба в одиночной игре. Защита
+  // живёт в одном месте — обёртке setPicker, поэтому она работает для всех
+  // точек входа: BottomNav, HomeScreen vibe-chips, PickerScreen, CreateLobby,
+  // PlayerSetup, любых будущих UI.
+  const vibeLockedRef = useRef(false)
   const setPicker = useCallback((update) => {
-    setPickerRaw(prev => typeof update === 'function' ? update(prev) : update)
+    setPickerRaw(prev => {
+      const next = typeof update === 'function' ? update(prev) : update
+      if (vibeLockedRef.current && next && next.vibe && next.vibe !== prev.vibe) {
+        return prev // отклоняем смену вайба — игра/лобби идёт
+      }
+      return next
+    })
   }, [])
   const [room, setRoom] = useState(null)
   const [roundIndex, setRoundIndex] = useState(0)
@@ -816,6 +831,7 @@ export default function App() {
     try { localStorage.removeItem('pu_croco_stats') } catch {}
     try { localStorage.removeItem('pu_whoami_stats') } catch {}
     try { localStorage.removeItem('pu_wr_stats') } catch {}
+    try { localStorage.removeItem('pu_truth_stats') } catch {}
 
     // Универсальная функция: тасуем пул и берём первые N карточек.
     const buildDeck = () => {
@@ -1103,6 +1119,7 @@ export default function App() {
             onBurst={burstFromEvent}
             ownedPacks={ownedPacks}
             popularIds={popularGameIds}
+            vibeLocked={isMultiplayer && roomId != null}
             onBuyVibe={(v) => setBuyVibe(v)} />}
         {screen === SCREENS.GAMES &&
           <GamesScreen
@@ -1373,13 +1390,18 @@ export default function App() {
       </main>
 
       {/* BottomNav статичный — виден на всех экранах.
-          ВАЖНО: пока идёт партия (mp playing или single-player в ROUND/RESULTS)
-          смена вайба ЗАПРЕЩЕНА: deck зафиксирован под исходный вайб, и любая
-          смена приведёт к рассинхрону карточек между игроками (mp) или просто
-          игнорируется в текущей партии (single). */}
+          vibeLocked: как только пользователь зашёл в лобби (или есть активная
+          mp-комната, или открыт раунд/результаты) — вайб фиксируется. Кнопка
+          выглядит просто отключённой (без отдельного индикатора-замочка), а
+          фактическая защита смены вайба сидит в setPicker (см. выше) —
+          сработает даже если попытаться поменять через другую точку входа
+          (vibe-chip на главной, slider в PickerScreen и т.д.). */}
       {(() => {
-        const vibeLocked = (isMultiplayer && room?.state === 'playing')
-          || (!isMultiplayer && (screen === SCREENS.ROUND || screen === SCREENS.RESULTS))
+        const vibeLocked = (isMultiplayer && roomId != null)
+          || screen === SCREENS.LOBBY
+          || screen === SCREENS.ROUND
+          || screen === SCREENS.RESULTS
+        vibeLockedRef.current = vibeLocked
         return <>
           <BottomNav
             screen={screen}
@@ -1387,7 +1409,7 @@ export default function App() {
             currentVibe={picker.vibe}
             vibeLocked={vibeLocked}
             onOpenVibePicker={() => {
-              if (vibeLocked) { haptic('warning'); return }
+              if (vibeLocked) return // тихо игнорируем — кнопка визуально disabled
               haptic(); setShowVibePicker(true)
             }}
           />
@@ -1736,9 +1758,9 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker, vibeLock
           // Центральный слот — только иконка вайба (название не помещалось
           // для «Близкие друзья» и др.). Цветная индикация = текущий вайб,
           // кружок-индикатор внизу, под иконкой подпись «Вайб» как у других
-          // слотов (короткая, всегда одна и та же). Когда vibeLocked — кнопка
-          // визуально приглушена + иконка lock, открытие picker'а блокируется
-          // в onClick parent'а.
+          // слотов. Когда vibeLocked — рендерим как disabled-кнопку без
+          // отдельного индикатора (замочек убран по запросу), пульсация
+          // выключена.
           return (
             <button
               key="vibe"
@@ -1746,14 +1768,14 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker, vibeLock
               className={`bnav-item is-vibe ${vibeLocked ? 'is-vibe-locked' : ''}`}
               data-vibe={vibe.id}
               onClick={onOpenVibePicker}
+              disabled={vibeLocked}
+              aria-disabled={vibeLocked}
               aria-label={vibeLocked
-                ? `Вайб зафиксирован на партию: ${vibe.label}`
+                ? `Вайб зафиксирован: ${vibe.label}`
                 : `Сменить вайб (сейчас: ${vibe.label})`}
-              title={vibeLocked ? 'Вайб зафиксирован на партию' : undefined}
             >
               <span className="bnav-vibe-icon">
                 <VibeIcon vibeId={vibe.id} size={22}/>
-                {vibeLocked && <span className="bnav-vibe-lock"><Lock size={9}/></span>}
               </span>
               <span className="bnav-vibe-label">{vibe.label}</span>
             </button>
@@ -2319,7 +2341,7 @@ function GameSections({ onGame, activeGameIds }) {
 }
 
 /* ─── HomeScreen ──────────────────────────────────────────────────────────── */
-function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst, ownedPacks = [], onBuyVibe, popularIds }) {
+function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst, ownedPacks = [], onBuyVibe, popularIds, vibeLocked = false }) {
   const [vibeToast, setVibeToast] = useState(false)
   const [showAdultModal, setShowAdultModal] = useState(null)
   const [pendingAdultEvt, setPendingAdultEvt] = useState(null)
@@ -2338,6 +2360,7 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst, 
 
   const handleVibeChange = (vibeId) => {
     if (vibeId === picker.vibe) return
+    if (vibeLocked) return // вайб зафиксирован активной партией
     const v = VIBES.find(x => x.id === vibeId)
     // Платный вайб без покупки — открываем модалку покупки, НЕ переключаем.
     if (v?.premium && v.packId && !ownedPacks.includes(v.packId)) {
@@ -2380,13 +2403,17 @@ function HomeScreen({ picker, setPicker, onPicker, onGame, onAllGames, onBurst, 
             Выбери настроение — приложение адаптирует <strong>вопросы, задания и контент</strong> под твою компанию.
           </p>
         </div>
-        <div ref={vibeScrollRef} className="vibe-scroll" role="listbox" aria-label="Выбор вайба">
+        <div ref={vibeScrollRef} className={`vibe-scroll ${vibeLocked ? 'is-vibe-frozen' : ''}`} role="listbox" aria-label="Выбор вайба">
           {VIBES.map(v => {
             const locked = v.premium && v.packId && !ownedPacks.includes(v.packId)
+            const isActive = v.id === picker.vibe
+            const disabled = vibeLocked && !isActive
             return (
-              <button key={v.id} role="option" aria-selected={v.id === picker.vibe}
-                className={`vibe-chip ${v.id === picker.vibe ? 'is-active' : ''} ${locked ? 'is-locked' : ''}`}
+              <button key={v.id} role="option" aria-selected={isActive}
+                className={`vibe-chip ${isActive ? 'is-active' : ''} ${locked ? 'is-locked' : ''}`}
                 data-adult={(v.id === 'adult' || v.id === 'ultra_adult') ? 'true' : undefined}
+                disabled={disabled}
+                aria-disabled={disabled}
                 onClick={(e) => handleVibeChange(v.id, e)}>
                 <span className="vibe-chip-icon"><VibeIcon vibeId={v.id} size={20}/></span>
                 <span className="vibe-chip-label">{v.label}</span>
@@ -3385,23 +3412,18 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
       {(!isMultiplayer || isHost) ? (
         <div className="lobby-axis-stack">
           <div className="setup-axis-card">
-            {/* Вайб ЛОКАЕМ после старта игры — иначе deck (зафиксированный в DO)
-                разойдётся со свежим фильтром и игроки увидят разные карточки. */}
+            {/* Вайб в лобби фиксирован (выбирается ДО создания комнаты на главной/
+                в picker'е). Кнопка disabled без отдельного индикатора-замочка. */}
             <button
-              className={`setup-axis-row ${room?.state === 'playing' ? 'is-locked' : ''}`}
-              onClick={() => {
-                if (room?.state === 'playing') { haptic?.('warning'); return }
-                setShowVibe(true)
-              }}
-              aria-disabled={room?.state === 'playing'}
-              title={room?.state === 'playing' ? 'Вайб зафиксирован на время партии' : undefined}
+              className="setup-axis-row is-locked"
+              disabled
+              aria-disabled="true"
             >
               <div className="setup-axis-key">
                 <VibeIcon vibeId={currentVibe} size={16}/> Вайб
               </div>
               <div className="setup-axis-val">
                 {VIBES.find(v => v.id === currentVibe)?.label || 'Разогрев'}
-                {room?.state === 'playing' ? <Lock size={13}/> : <ChevronRight size={14}/>}
               </div>
             </button>
           </div>
@@ -3730,6 +3752,18 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
     if (!pool.length) return
     const p = drawFromBag(type) || pool[Math.floor(Math.random() * pool.length)]
     haptic('impact')
+    // pu_truth_stats: { [pid]: { name, truths, dares } } — для рейтинга на финише.
+    // Параметр «смелость» = больше Действий; «открытость» = больше Правд; ничья = баланс.
+    try {
+      const k = 'pu_truth_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, truths: 0, dares: 0 }
+      s.name = activePlayer.name
+      if (type === 'truth') s.truths += 1
+      else s.dares += 1
+      all[activePlayer.id] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
     if (isMultiplayer && roomId) {
       const optimistic = {
         choice: type,
@@ -6311,78 +6345,81 @@ function TitlesBoard({ players, game }) {
    очками и подписями. Источник «очков» меняется от игры: для truth/alias/
    crocodile/whoami/would_rather — это `scores`; для whoofus/never/five/
    associations берётся per-game stats из localStorage. */
+// Per-place заголовки (1-е → 5-е). Title описывает РАНГ по тому же критерию,
+// что и computeGameRanking: для truth — смелость (dares), для alias — слова,
+// для crocodile — угаданные показы и т.д. Подзаголовок (sub) перезаписывается
+// row.detail в RatingList — там реальная статистика игрока.
 const GAME_PLACE_TITLES = {
-  // Каждый массив — 5 ачивок (1-е, 2-е, 3-е, 4-е, 5-е место).
   truth: [
-    { medal: '🏆', title: 'Самый смелый', sub: 'Принял все вызовы вечера' },
-    { medal: '🥈', title: 'Открытый',     sub: 'Без боязни признаний' },
-    { medal: '🥉', title: 'Готов на всё', sub: 'Не отступал перед заданиями' },
-    { medal: '🎯', title: 'Достойный собеседник', sub: 'Хорошо включился' },
-    { medal: '✨', title: 'В игре',       sub: 'Часть весёлого вечера' },
+    { medal: '🏆', title: 'Самый смелый',   sub: '' },
+    { medal: '🥈', title: 'Идёт на риск',   sub: '' },
+    { medal: '🥉', title: 'Без колебаний',  sub: '' },
+    { medal: '🎯', title: 'В деле',         sub: '' },
+    { medal: '✨', title: 'Поучаствовал',   sub: '' },
   ],
   never: [
-    { medal: '🏆', title: 'Многое повидал', sub: 'Больше всех нажимал «Было»' },
-    { medal: '🥈', title: 'Заводила вечера', sub: 'Второе место по опыту' },
-    { medal: '🥉', title: 'Бывалый',      sub: 'Опыт богатый' },
-    { medal: '🎯', title: 'Знает жизнь',  sub: 'Достойный список приключений' },
-    { medal: '✨', title: 'Был в теме',    sub: 'Часть огонька вечера' },
+    { medal: '🏆', title: 'Многое повидал',     sub: '' },
+    { medal: '🥈', title: 'Заводила вечера',    sub: '' },
+    { medal: '🥉', title: 'Бывалый',            sub: '' },
+    { medal: '🎯', title: 'Знает жизнь',        sub: '' },
+    { medal: '✨', title: 'Был в теме',         sub: '' },
   ],
   whoofus: [
-    { medal: '🏆', title: 'Звезда компании', sub: 'Большинство выбирало именно тебя' },
-    { medal: '🥈', title: 'Душа компании', sub: 'Тебя замечают' },
-    { medal: '🥉', title: 'Главное лицо', sub: 'В центре внимания' },
-    { medal: '🎯', title: 'Заметный игрок', sub: 'Тебя помнят' },
-    { medal: '✨', title: 'В кадре',       sub: 'Свой среди своих' },
+    { medal: '🏆', title: 'Звезда компании',  sub: '' },
+    { medal: '🥈', title: 'Душа компании',    sub: '' },
+    { medal: '🥉', title: 'В центре внимания', sub: '' },
+    { medal: '🎯', title: 'Заметный игрок',   sub: '' },
+    { medal: '✨', title: 'Свой',             sub: '' },
   ],
   five: [
-    { medal: '🏆', title: 'Молниеносный', sub: 'Без пауз и запинок' },
-    { medal: '🥈', title: 'Чёткий ход',   sub: 'Почти не давал сбоев' },
-    { medal: '🥉', title: 'Сообразительный', sub: 'Достойный темп' },
-    { medal: '🎯', title: 'Стабильный',   sub: 'Уверенный результат' },
-    { medal: '✨', title: 'В пятёрке',    sub: 'Не подвёл компанию' },
+    { medal: '🏆', title: 'Молниеносный',     sub: '' },
+    { medal: '🥈', title: 'Чёткий ход',       sub: '' },
+    { medal: '🥉', title: 'Сообразительный',  sub: '' },
+    { medal: '🎯', title: 'Стабильный',       sub: '' },
+    { medal: '✨', title: 'В пятёрке',        sub: '' },
   ],
   associations: [
-    { medal: '🏆', title: 'Думает как все', sub: 'Идеальное чувство компании' },
-    { medal: '🥈', title: 'На общей волне', sub: 'Часто попадает в группу' },
-    { medal: '🥉', title: 'Хорошо чувствует', sub: 'Совпадения не редкость' },
-    { medal: '🎯', title: 'В команде',    sub: 'Свой ход мысли' },
-    { medal: '✨', title: 'Часть потока', sub: 'Был на одной волне' },
+    { medal: '🏆', title: 'Думает как все',    sub: '' },
+    { medal: '🥈', title: 'На общей волне',    sub: '' },
+    { medal: '🥉', title: 'Хорошо чувствует',  sub: '' },
+    { medal: '🎯', title: 'В команде',         sub: '' },
+    { medal: '✨', title: 'Часть потока',      sub: '' },
   ],
   would_rather: [
-    { medal: '🏆', title: 'Решительный',  sub: 'Выбирает уверенно' },
-    { medal: '🥈', title: 'Без сомнений', sub: 'Знает, что хочет' },
-    { medal: '🥉', title: 'Уверенный выбор', sub: 'Хорошие инстинкты' },
-    { medal: '🎯', title: 'Свой вкус',    sub: 'Не идёт на поводу' },
-    { medal: '✨', title: 'В игре',       sub: 'Часть жарких споров' },
+    { medal: '🏆', title: 'На одной волне',     sub: '' },
+    { medal: '🥈', title: 'С большинством',     sub: '' },
+    { medal: '🥉', title: 'Чувствует группу',   sub: '' },
+    { medal: '🎯', title: 'Свой вкус',          sub: '' },
+    { medal: '✨', title: 'Против течения',     sub: '' },
   ],
   crocodile: [
-    { medal: '🏆', title: 'Мастер пантомимы', sub: 'Слова угадываются мгновенно' },
-    { medal: '🥈', title: 'Артистичный',   sub: 'Без слов всё понятно' },
-    { medal: '🥉', title: 'Понятный',     sub: 'Жесты говорят сами' },
-    { medal: '🎯', title: 'Старательный', sub: 'Не сдавался до конца' },
-    { medal: '✨', title: 'В роли',        sub: 'Часть весёлого шоу' },
+    { medal: '🏆', title: 'Мастер пантомимы',   sub: '' },
+    { medal: '🥈', title: 'Артистичный',        sub: '' },
+    { medal: '🥉', title: 'Понятный',           sub: '' },
+    { medal: '🎯', title: 'Старательный',       sub: '' },
+    { medal: '✨', title: 'В роли',             sub: '' },
   ],
   alias: [
-    { medal: '🏆', title: 'Король объяснений', sub: 'Слова летят как из автомата' },
-    { medal: '🥈', title: 'Чёткий рассказчик', sub: 'Понятно и быстро' },
-    { medal: '🥉', title: 'Хороший спикер', sub: 'Объяснил много' },
-    { medal: '🎯', title: 'Понятный',     sub: 'Команда угадывала' },
-    { medal: '✨', title: 'В команде',     sub: 'Внёс свой вклад' },
+    { medal: '🏆', title: 'Король объяснений',  sub: '' },
+    { medal: '🥈', title: 'Чёткий рассказчик',  sub: '' },
+    { medal: '🥉', title: 'Хороший спикер',     sub: '' },
+    { medal: '🎯', title: 'Понятный',           sub: '' },
+    { medal: '✨', title: 'В команде',          sub: '' },
   ],
   whoami: [
-    { medal: '🏆', title: 'Острый ум',    sub: 'Угадал быстрее всех' },
-    { medal: '🥈', title: 'Умный сыщик',  sub: 'Грамотные вопросы' },
-    { medal: '🥉', title: 'Догадливый',   sub: 'Хорошая интуиция' },
-    { medal: '🎯', title: 'Любознательный', sub: 'Задавал много вопросов' },
-    { medal: '✨', title: 'В деле',        sub: 'Не сдавался' },
+    { medal: '🏆', title: 'Острый ум',          sub: '' },
+    { medal: '🥈', title: 'Умный сыщик',        sub: '' },
+    { medal: '🥉', title: 'Догадливый',         sub: '' },
+    { medal: '🎯', title: 'Любознательный',     sub: '' },
+    { medal: '✨', title: 'В деле',             sub: '' },
   ],
 }
 const DEFAULT_PLACE_TITLES = [
-  { medal: '🏆', title: 'Победитель',  sub: 'Главный герой вечера' },
-  { medal: '🥈', title: 'Второе место', sub: 'Совсем рядом с первым' },
-  { medal: '🥉', title: 'Третье место', sub: 'Достойный результат' },
-  { medal: '🎯', title: 'В четвёрке',   sub: 'Хороший игрок' },
-  { medal: '✨', title: 'В пятёрке',    sub: 'Часть компании' },
+  { medal: '🏆', title: 'Победитель',    sub: '' },
+  { medal: '🥈', title: 'Второе место',  sub: '' },
+  { medal: '🥉', title: 'Третье место',  sub: '' },
+  { medal: '🎯', title: 'В четвёрке',    sub: '' },
+  { medal: '✨', title: 'В пятёрке',     sub: '' },
 ]
 
 // Безопасное чтение per-game stats из localStorage.
@@ -6390,61 +6427,136 @@ function loadGameStats(key) {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
 
-// Возвращает { value, unit } для каждой игры на основе нужного источника очков.
+// Простой плюрализатор: pluralRu(2, 'голос', 'голоса', 'голосов') → 'голоса'.
+function pluralRu(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10
+  if (a >= 11 && a <= 14) return many
+  if (b === 1) return one
+  if (b >= 2 && b <= 4) return few
+  return many
+}
+
+// Возвращает { rows, unit } для каждой игры. Каждая row содержит:
+//   value: число для сортировки/отображения, tieBreak: вторичный,
+//   detail: короткая динамическая подпись из РЕАЛЬНЫХ данных
+//          (для RatingList — заменяет статичную фразу-ачивку).
+// Сортировка: по убыванию value, затем tieBreak.
 function computeGameRanking(players, scores, game) {
   const id = game?.id
   let rows = []
-  let unit = 'оч.'
-  if (id === 'whoofus') {
-    const s = loadGameStats('pu_whoofus_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
-    unit = (n) => `${n} голос${n === 1 ? '' : n < 5 ? 'а' : 'ов'}`
+  let unit = (n) => `${n} ${pluralRu(n, 'очко', 'очка', 'очков')}`
+
+  if (id === 'truth') {
+    // Параметр «смелость» = больше «Действий»; tieBreak = общая активность.
+    const s = loadGameStats('pu_truth_stats')
+    rows = players.map(p => {
+      const t = Number(s[p.id]?.truths || 0)
+      const d = Number(s[p.id]?.dares || 0)
+      const total = t + d
+      const detail = total > 0
+        ? `${d} действ. · ${t} правд`
+        : 'не успел походить'
+      return { ...p, value: d, tieBreak: total, detail, _truths: t, _dares: d, _total: total }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'действие', 'действия', 'действий')}`
+
   } else if (id === 'never') {
     const s = loadGameStats('pu_never_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.yes || 0) }))
-    unit = (n) => `${n} призн.`
+    rows = players.map(p => {
+      const yes = Number(s[p.id]?.yes || 0)
+      const no = Number(s[p.id]?.no || 0)
+      const total = yes + no
+      const detail = total > 0 ? `${yes} «было» · ${no} «не было»` : 'не голосовал'
+      return { ...p, value: yes, tieBreak: -no, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'признание', 'признания', 'признаний')}`
+
+  } else if (id === 'whoofus') {
+    const s = loadGameStats('pu_whoofus_stats')
+    rows = players.map(p => {
+      const v = Number(s[p.id] || 0)
+      return { ...p, value: v, detail: v > 0 ? `${v} ${pluralRu(v,'номинация','номинации','номинаций')}` : 'без номинаций' }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'голос', 'голоса', 'голосов')}`
+
   } else if (id === 'five') {
     const s = loadGameStats('pu_five_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.success || 0), tieBreak: -Number(s[p.id]?.fail || 0) }))
-    unit = (n) => `${n} удач`
+    rows = players.map(p => {
+      const suc = Number(s[p.id]?.success || 0)
+      const fail = Number(s[p.id]?.fail || 0)
+      const total = suc + fail
+      const pct = total > 0 ? Math.round((suc / total) * 100) : 0
+      const detail = total > 0 ? `${suc}✓ из ${total} (${pct}%)` : 'не отвечал'
+      return { ...p, value: suc, tieBreak: -fail, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'удача', 'удачи', 'удач')}`
+
   } else if (id === 'associations') {
     const s = loadGameStats('pu_assoc_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
-    unit = (n) => `${n} совп.`
+    rows = players.map(p => {
+      const v = Number(s[p.id] || 0)
+      return { ...p, value: v, detail: v > 0 ? `${v} ${pluralRu(v,'совпадение','совпадения','совпадений')} с группой` : 'без совпадений' }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'совпадение', 'совпадения', 'совпадений')}`
+
   } else if (id === 'alias') {
     const s = loadGameStats('pu_alias_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.totalCorrect || scores?.[p.id] || 0), tieBreak: -Number(s[p.id]?.totalSkipped || 0) }))
-    unit = (n) => `${n} объясн.`
+    rows = players.map(p => {
+      const cor = Number(s[p.id]?.totalCorrect || 0)
+      const sk = Number(s[p.id]?.totalSkipped || 0)
+      const best = Number(s[p.id]?.bestRound || 0)
+      const detail = cor + sk > 0
+        ? `${cor} объяснено · лучший раунд: ${best}`
+        : 'не объяснял'
+      return { ...p, value: cor, tieBreak: -sk, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'слово', 'слова', 'слов')}`
+
   } else if (id === 'crocodile') {
     const s = loadGameStats('pu_croco_stats')
-    rows = players.map(p => ({
-      ...p,
-      // Очки за показ — 2 за каждое угаданное; +1 за участие как зритель не считаем
-      // (нет данных). Сортировка по reactiveScores как fallback (recordRoundScore).
-      value: Number(scores?.[p.id] || (Number(s[p.id]?.guessed || 0) * 2)),
-      tieBreak: -Number(s[p.id]?.missed || 0),
-    }))
-    unit = (n) => `${n} оч.`
+    rows = players.map(p => {
+      const g = Number(s[p.id]?.guessed || 0)
+      const m = Number(s[p.id]?.missed || 0)
+      const shown = g + m
+      const detail = shown > 0
+        ? `${g} из ${shown} ${pluralRu(shown,'слово','слова','слов')} угадано`
+        : 'не показывал'
+      return { ...p, value: g, tieBreak: -m, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'слово', 'слова', 'слов')}`
+
   } else if (id === 'whoami') {
     const s = loadGameStats('pu_whoami_stats')
-    rows = players.map(p => ({
-      ...p,
-      value: Number(scores?.[p.id] || s[p.id]?.totalPts || 0),
-      tieBreak: Number(s[p.id]?.wins || 0),
-    }))
-    unit = (n) => `${n} оч.`
+    rows = players.map(p => {
+      const w = Number(s[p.id]?.wins || 0)
+      const pts = Number(s[p.id]?.totalPts || scores?.[p.id] || 0)
+      const best = Number(s[p.id]?.bestPts || 0)
+      const detail = w > 0
+        ? `${w} ${pluralRu(w,'персонаж','персонажа','персонажей')} · +${pts} оч (лучшая: +${best})`
+        : 'не угадал'
+      return { ...p, value: w, tieBreak: pts, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'отгадка', 'отгадки', 'отгадок')}`
+
   } else if (id === 'would_rather') {
     const s = loadGameStats('pu_wr_stats')
-    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.majority || 0), tieBreak: Number(s[p.id]?.total || 0) }))
-    unit = (n) => `${n} с большинств.`
-  } else if (id === 'truth') {
-    // По активному времени на хоту (чем дольше игрок «держался под прицелом» —
-    // тем смелее). activeMs приходит из room.players (recordActiveMs).
-    rows = players.map(p => ({ ...p, value: Math.round(Number(p.activeMs || 0) / 1000), tieBreak: Number(scores?.[p.id] || 0) }))
-    unit = (n) => `${n} сек.`
+    rows = players.map(p => {
+      const maj = Number(s[p.id]?.majority || 0)
+      const total = Number(s[p.id]?.total || 0)
+      const a = Number(s[p.id]?.picksA || 0)
+      const b = Number(s[p.id]?.picksB || 0)
+      const detail = total > 0
+        ? `${maj} из ${total} с большинством · А ${a} / Б ${b}`
+        : 'не выбирал'
+      return { ...p, value: maj, tieBreak: total, detail }
+    })
+    unit = (n) => `${n} ${pluralRu(n, 'попадание', 'попадания', 'попаданий')}`
+
   } else {
-    rows = players.map(p => ({ ...p, value: Number(scores?.[p.id] || 0) }))
-    unit = (n) => `${n} оч.`
+    rows = players.map(p => {
+      const v = Number(scores?.[p.id] || 0)
+      return { ...p, value: v, detail: `${v} ${pluralRu(v,'очко','очка','очков')}` }
+    })
   }
   rows.sort((a, b) => (b.value - a.value) || ((b.tieBreak||0) - (a.tieBreak||0)))
   return { rows, unit }
@@ -6536,15 +6648,21 @@ function gameFunFacts(players, scores, game) {
     for (const v of Object.values(s)) total += Number(v || 0)
     if (total > 0) out.push({ icon: '✨', value: total, label: 'совпадений в ассоциациях' })
   } else if (id === 'truth') {
-    let totalSec = 0, longest = { v: 0, pid: null }
-    for (const p of players) {
-      const sec = Math.round(Number(p.activeMs || 0) / 1000)
-      totalSec += sec
-      if (sec > longest.v) longest = { v: sec, pid: p.id }
+    const s = loadGameStats('pu_truth_stats')
+    let totalT = 0, totalD = 0
+    let brave = { v: 0, pid: null }   // больше всех Действий
+    let open = { v: 0, pid: null }    // больше всех Правд
+    for (const [pid, r] of Object.entries(s)) {
+      const t = Number(r.truths || 0), d = Number(r.dares || 0)
+      totalT += t; totalD += d
+      if (d > brave.v) brave = { v: d, pid }
+      if (t > open.v) open = { v: t, pid }
     }
-    if (totalSec > 0) {
-      out.push({ icon: '⏱️', value: `${Math.round(totalSec / 60)} мин`, label: 'всего на пьедестале' })
-      if (longest.v > 0) out.push({ icon: '🔥', value: `${longest.v} с`, label: `держался дольше всех — ${byId(longest.pid)}` })
+    if (totalT + totalD > 0) {
+      out.push({ icon: '🔥', value: totalD, label: 'выбрано «Действие»' })
+      out.push({ icon: '🎯', value: totalT, label: 'выбрано «Правда»' })
+      if (brave.v > 0) out.push({ icon: '😎', value: brave.v, label: `самый смелый — ${byId(brave.pid)}` })
+      if (open.v > 0 && open.pid !== brave.pid) out.push({ icon: '💬', value: open.v, label: `самый откровенный — ${byId(open.pid)}` })
     }
   }
   return out
@@ -6572,7 +6690,7 @@ function GameStatsBlock({ players, scores, game }) {
 
 function RatingList({ players, scores, game, winnerId }) {
   const { rows, unit } = computeGameRanking(players, scores, game)
-  // Кандидаты на места 2-5: всё после winnerId, фильтр value>0 опционален.
+  // Кандидаты на места 2-5: всё после winnerId.
   const rest = rows.filter(r => String(r.id) !== String(winnerId)).slice(0, 4)
   if (!rest.length) return null
   const titles = GAME_PLACE_TITLES[game?.id] || DEFAULT_PLACE_TITLES
@@ -6584,6 +6702,13 @@ function RatingList({ players, scores, game, winnerId }) {
         {rest.map((p, i) => {
           const place = i + 2 // начинаем со 2-го места
           const t = titles[place - 1] || titles[titles.length - 1]
+          // Заголовок места (постоянный — «Второе место», «Третье место»...)
+          // + динамический sub: реальная статистика игрока из row.detail
+          // (например «12 действ. · 3 правд» вместо общей «Принял все вызовы»).
+          // detail приходит из computeGameRanking и описывает РЕАЛЬНУЮ
+          // статистику игрока («5 действ. · 2 правд», «12 объяснено · лучший
+          // раунд: 7» и т.д.) — это важнее статичных «принял все вызовы».
+          const sub = p.detail || t.sub || ''
           return (
             <div key={p.id} className={`rating-card rating-card-p${place}`}>
               <div className="rating-card-medal">{t.medal}<span className="rating-card-place">{place}</span></div>
@@ -6591,7 +6716,7 @@ function RatingList({ players, scores, game, winnerId }) {
               <div className="rating-card-body">
                 <div className="rating-card-name">{p.name}</div>
                 <div className="rating-card-title">{t.title}</div>
-                <div className="rating-card-sub">{t.sub}</div>
+                {sub && <div className="rating-card-sub">{sub}</div>}
               </div>
               <div className="rating-card-score">{unitStr(p.value)}</div>
             </div>
@@ -6630,51 +6755,73 @@ function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, 
   }, [isMultiplayer, isHost, roomId, onHostNavigated])
 
   const [shared, setShared] = useState(false)
-  const hasScores = players.some(p => (scores[p.id] || 0) > 0)
 
-  const ranked = useMemo(() =>
-    [...players].sort((a, b) => (scores[b.id] || 0) - (scores[a.id] || 0)),
-    [players, scores]
-  )
+  // Универсальный рейтинг на основе per-game stats — корректно работает для
+  // всех 9 игр (а не только тех, где scores[] заполнен через recordRoundScore).
+  const rankedRows = useMemo(() => computeGameRanking(players, scores, game).rows, [players, scores, game])
+  const rankedUnit = useMemo(() => computeGameRanking(players, scores, game).unit, [players, scores, game])
+  // legacy alias — для top3-карточек (которые ниже уже не рендерятся, но
+  // оставим ranked доступным для возможного fallback).
+  const ranked = rankedRows
 
   const shareResultsToTelegram = useCallback(async () => {
     const lines = [`🎉 Итоги — ${game.title}`, '']
     const medals = ['🏆','🥈','🥉']
-    ranked.forEach((p, i) => {
+    const unitFn = typeof rankedUnit === 'function' ? rankedUnit : (n) => `${n} ${rankedUnit}`
+    rankedRows.forEach((p, i) => {
       const m = medals[i] || `${i+1}.`
-      lines.push(`${m} ${p.name}${hasScores ? ` — ${scores[p.id]||0} оч.` : ''}`)
+      const v = Number(p.value || 0)
+      lines.push(`${m} ${p.name}${v > 0 ? ` — ${unitFn(v)}` : ''}`)
     })
     const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, `g_${game.id}`) || 'https://partyup-game.ru'
     lines.push('', `🎮 Сыграйте вместе: ${deeplink}`)
     const text = lines.join('\n')
     await doInviteShare({ deeplink, text, gameId: game.id, kind: 'results', evName: 'results' })
     setShared(true)
-  }, [game, ranked, scores, hasScores])
+  }, [game, rankedRows, rankedUnit])
 
 const podiumMedals = ['🏆', '🥈', '🥉']
   const podiumLabels = ['Победитель', 'Второе место', 'Третье место']
   const top3 = ranked.slice(0, 3)
 
-  // Игре-зависимый «титул» победителя: одна строчка, которая делает
-  // карточку личной для каждой игры.
-  const GAME_WINNER_TAGLINE = {
+  // Универсальный winner через computeGameRanking. При нулевом value (никто не
+  // достиг главного критерия — например, все в truth выбрали только «Правду»)
+  // берём первого из ranked, чтобы хотя бы кто-то стал победителем.
+  const { rows: winnerRanked, unit: winnerUnit } = computeGameRanking(players, scores, game)
+  const winnerRow = winnerRanked[0] && winnerRanked[0].value > 0
+    ? winnerRanked[0]
+    : (winnerRanked[0] || ranked[0])
+  const winner = winnerRow
+  const winnerValue = Number(winnerRow?.value || 0)
+  const winnerUnitStr = typeof winnerUnit === 'function' ? winnerUnit(winnerValue) : `${winnerValue} ${winnerUnit}`
+
+  // Game-зависимый «титул» победителя. Для truth дополнительно подбирается
+  // на основе соотношения truths/dares (смелый vs открытый), для остальных —
+  // статичный (sub перезаписывается реальной статистикой через winnerSub ниже).
+  const baseTaglines = {
     truth:        { title: 'Самый смелый', sub: 'Принял все вызовы вечера' },
     never:        { title: 'Самая богатая жизнь', sub: 'Опыта — больше всех' },
     whoofus:      { title: 'Звезда компании', sub: 'Большинство выбирало именно тебя' },
     five:         { title: 'Самый быстрый ум', sub: 'Без пауз и запинок' },
     associations: { title: 'Думает как все', sub: 'Идеальное чувство компании' },
-    would_rather: { title: 'На одной волне с компанией', sub: 'Чаще всех попадал в большинство' },
+    would_rather: { title: 'На одной волне', sub: 'Чаще всех попадал в большинство' },
     crocodile:    { title: 'Мастер пантомимы', sub: 'Слова угадывали с первого жеста' },
     alias:        { title: 'Король объяснений', sub: 'Слова летели как из автомата' },
     whoami:       { title: 'Острый ум вечера', sub: 'Угадывал быстрее всех' },
   }
-  const tagline = GAME_WINNER_TAGLINE[game.id] || { title: 'Главный герой вечера', sub: game.title }
-  // Универсальный winner через computeGameRanking — корректно работает и для
-  // игр без recordRoundScore (whoofus, never) через per-game stats из localStorage.
-  const { rows: winnerRanked, unit: winnerUnit } = computeGameRanking(players, scores, game)
-  const winner = winnerRanked[0] && winnerRanked[0].value > 0 ? winnerRanked[0] : ranked[0]
-  const winnerValue = winner ? Number(winnerRanked.find(r => r.id === winner.id)?.value || 0) : 0
-  const winnerUnitStr = typeof winnerUnit === 'function' ? winnerUnit(winnerValue) : `${winnerValue} ${winnerUnit}`
+  const tagline = (() => {
+    const base = baseTaglines[game.id] || { title: 'Главный герой вечера', sub: game.title }
+    if (game.id === 'truth' && winnerRow) {
+      const d = winnerRow._dares || 0, t = winnerRow._truths || 0
+      if (d > 0 && d > t) return { title: 'Самый смелый', sub: base.sub }
+      if (t > 0 && t > d) return { title: 'Самый откровенный', sub: 'Не боялся честных ответов' }
+      if (d > 0 && t > 0 && d === t) return { title: 'Универсал', sub: 'И смелый, и открытый' }
+    }
+    return base
+  })()
+  // Динамический подзаголовок победителя — реальная статистика игрока
+  // (например, «12 действ. · 3 правд» в truth). Если данных нет — статичный.
+  const winnerSub = winnerRow?.detail || tagline.sub
 
   return (
     <div className="results-v2">
@@ -6698,7 +6845,7 @@ const podiumMedals = ['🏆', '🥈', '🥉']
               <PlayerAvatar player={winner} auth={null} myId={null} size={96} className="winner-avatar"/>
             </div>
             <div className="winner-card-name">{winner.name}</div>
-            <div className="winner-card-tagline">{tagline.sub}</div>
+            <div className="winner-card-tagline">{winnerSub}</div>
             {winnerValue > 0 && (
               <div className="winner-card-score">
                 <span className="winner-card-score-n">{winnerValue}</span>
