@@ -2,19 +2,14 @@
 // Пользователь набирает «@PartyUp_Gamebot <команда>» в любом чате,
 // бот предлагает inline-результаты, юзер выбирает — сообщение уходит в чат.
 //
-// Поддержанные команды (RU/EN, регистр-независимо):
-//   ""              → топ-игры
-//   "помощь" | "help" | "?"      → справка по командам
-//   "игры" | "games"            → каталог всех игр
-//   "<id игры>" | "<название>"  → карточка игры с кнопкой «Открыть»
-//   "вайб <X>" | "vibe <X>"     → подборка игр под вайб
-//   "room ABCDEF" | "комната ABCDEF" → приглашение в комнату
-//   "правда" | "truth"          → случайная карточка-вопрос «Правда»
-//   "действие" | "dare"         → случайная карточка-задание «Действие»
-//   "никогда" | "never"         → случайная «Я никогда не…»
-//   "whoofus" | "кто из нас" → случайный «Кто из нас»
-//   "карточка" | "random"       → 4 случайные карточки разных типов
-//   "позвать" | "invite"        → красивая пригласительная карточка
+// Минималистичный набор — только полезные утилиты, без спама карточками
+// и каталогами игр (полная навигация уже в Mini App):
+//   ""              → invite + coin + d5 + d10 (всё что нужно в одной выдаче)
+//   "monетка" | "coin" | "орёл" | "решка" → подбросить монетку
+//   "d5"  | "кубик5"   | "кубик до 5"  → бросить d5
+//   "d10" | "кубик10"  | "кубик до 10" → бросить d10
+//   "позвать" | "invite" | "друг"      → ненавязчивое приглашение в игру
+//   "room ABCDEF" | "комната ABCDEF"   → ссылка в активную mp-комнату
 
 export const INLINE_GAMES = [
   { id: 'truth',        title: 'Правда или действие',  emoji: '🎯', short: 'Узнаешь о друзьях такое, что не забудешь', players: '3–10', vibes: ['warmup','funny'] },
@@ -135,14 +130,17 @@ function inviteResult(env, directLink) {
   return {
     type: 'article',
     id: `invite_${uid()}`,
-    title: '🎉 Позвать друзей в PartyUp',
-    description: 'Лучшие игры для компаний — старт за 10 секунд',
+    title: '🎮 Пригласить в PartyUp',
+    description: 'Одна строка + кнопка — открыть приложение',
     input_message_content: {
+      // Одна короткая строка. Ссылка скрыта в слове «PartyUp» — никакого
+      // голого URL, который ломает дизайн чата.
       message_text:
-        `🎉 <b>Зову играть в PartyUp!</b>\n` +
-        `Лучшие игры для компаний в одном приложении. Выбор вайба меняет весь контент и тон. Мультиплеер с друзьями в два клика.\n\n` +
-        `Старт за 10 секунд, без регистраций:\n${link}`,
+        `Сыграем в <a href="${link}">PartyUp</a>? Жми кнопку ниже.`,
       parse_mode: 'HTML',
+      // disable_web_page_preview = true → не разворачивается превью сайта
+      // в самом сообщении, остаётся чистой строкой.
+      link_preview_options: { is_disabled: true },
     },
     reply_markup: { inline_keyboard: [[{ text: '🎮 Открыть PartyUp', url: link }]] },
   };
@@ -303,24 +301,26 @@ function findVibe(query) {
 }
 
 // Главный обработчик inline_query → массив результатов для answerInlineQuery.
+// Минимальный набор: invite + coin + d5 + d10. Плюс room-join по коду комнаты.
 export function buildInlineResults(env, query, directLink) {
   const raw = String(query || '').trim();
   const q = norm(raw);
 
-  // 1. ПУСТО → invite + интерактив + топ-игры + помощь
+  // 1. ПУСТО → default 4: приглашение + монетка + d5 + d10
   if (!q) {
     return [
       inviteResult(env, directLink),
       coinResult(env, directLink),
-      diceResult(env, 20, directLink),
-      ...INLINE_GAMES.slice(0, 4).map(g => gameResult(env, g, directLink)),
-      helpResult(env, directLink),
+      diceResult(env, 5,  directLink),
+      diceResult(env, 10, directLink),
     ];
   }
 
-  // 2. ПОМОЩЬ
-  if (/^(help|помощь|\?|команды|cmd)/i.test(q)) {
-    return [helpResult(env, directLink)];
+  // 2. КОМНАТА: "room ABCDEF" / "комната ABCDEF" / отдельно код
+  const roomMatch = raw.match(/(?:room|комната)\s+([A-Za-z0-9]{4,12})/i)
+                 || raw.match(/^([A-Z0-9]{6})$/);
+  if (roomMatch) {
+    return [roomResult(env, roomMatch[1].toUpperCase(), directLink)];
   }
 
   // 3. ПРИГЛАШЕНИЕ
@@ -328,83 +328,28 @@ export function buildInlineResults(env, query, directLink) {
     return [inviteResult(env, directLink)];
   }
 
-  // 4. КОМНАТА: "room ABCDEF" / "комната ABCDEF" / отдельно код
-  const roomMatch = raw.match(/(?:room|комната)\s+([A-Za-z0-9]{4,12})/i)
-                 || raw.match(/^([A-Z0-9]{6})$/);
-  if (roomMatch) {
-    return [roomResult(env, roomMatch[1].toUpperCase(), directLink)];
-  }
-
-  // 4.5 ИНТЕРАКТИВНЫЕ МИНИ-ИГРЫ
+  // 4. МОНЕТКА
   if (/^(coin|монет|орёл|орел|решка)/i.test(q)) {
     return [coinResult(env, directLink)];
   }
-  if (/^(d20|кубик 20|двадцат)/i.test(q)) {
-    return [diceResult(env, 20, directLink)];
+
+  // 5. КУБИКИ — только d5 и d10
+  if (/^(d5|кубик5|кубик 5|кубик до 5|пятёр|пятер)/i.test(q)) {
+    return [diceResult(env, 5, directLink)];
   }
-  if (/^(d6|кубик|dice|зар)/i.test(q)) {
-    return [diceResult(env, 6, directLink), diceResult(env, 20, directLink)];
+  if (/^(d10|кубик10|кубик 10|кубик до 10|десят)/i.test(q)) {
+    return [diceResult(env, 10, directLink)];
   }
-  if (/^(d100|сот)/i.test(q)) {
-    return [diceResult(env, 100, directLink)];
-  }
-  if (/^(выбра|случайн человек|pick|кто|random person|жереб)/i.test(q)) {
-    return [pickPersonResult(env, directLink)];
-  }
-  if (/^(дуэль|duel|быстрее)/i.test(q)) {
-    // duel — это просто d2 (по сути «кто первый» — без сложной механики)
-    return [diceResult(env, 2, directLink)];
+  if (/^(d\d+|кубик|dice|зар|бросок|roll)/i.test(q)) {
+    // Общий запрос про кубик — даём оба варианта
+    return [diceResult(env, 5, directLink), diceResult(env, 10, directLink)];
   }
 
-  // 5. КАРТОЧКИ
-  if (/^(truth|правда)/i.test(q)) {
-    return pick(INLINE_CARDS.truth, 4).map(t => cardResult(env, 'truth', t, directLink));
-  }
-  if (/^(dare|действ)/i.test(q)) {
-    return pick(INLINE_CARDS.dare, 4).map(t => cardResult(env, 'dare', t, directLink));
-  }
-  if (/^(never|никогда)/i.test(q)) {
-    return pick(INLINE_CARDS.never, 4).map(t => cardResult(env, 'never', t, directLink));
-  }
-  if (/^(whoofus|кто из|кто из нас)/i.test(q)) {
-    return pick(INLINE_CARDS.whoofus, 4).map(t => cardResult(env, 'whoofus', t, directLink));
-  }
-  if (/^(card|карточка|random|случай)/i.test(q)) {
-    return [
-      cardResult(env, 'truth', pick(INLINE_CARDS.truth, 1)[0], directLink),
-      cardResult(env, 'dare', pick(INLINE_CARDS.dare, 1)[0], directLink),
-      cardResult(env, 'never', pick(INLINE_CARDS.never, 1)[0], directLink),
-      cardResult(env, 'whoofus', pick(INLINE_CARDS.whoofus, 1)[0], directLink),
-    ];
-  }
-
-  // 6. ВАЙБ: "vibe X" / "вайб X" / просто алиас
-  let vibeId = null;
-  const vMatch = raw.match(/^(?:vibe|вайб|настроение)\s+(.+)$/i);
-  if (vMatch) vibeId = findVibe(vMatch[1]);
-  if (!vibeId) vibeId = findVibe(q);
-  if (vibeId) {
-    const games = INLINE_GAMES.filter(g => g.vibes.includes(vibeId)).slice(0, 5);
-    const vr = vibeResult(env, vibeId, directLink);
-    return [vr, ...games.map(g => gameResult(env, g, directLink))].filter(Boolean);
-  }
-
-  // 7. КАТАЛОГ
-  if (/^(games|игры|каталог|all|все)/i.test(q)) {
-    return INLINE_GAMES.slice(0, 12).map(g => gameResult(env, g, directLink));
-  }
-
-  // 8. КОНКРЕТНАЯ ИГРА
-  const game = findGame(raw);
-  if (game) {
-    const related = INLINE_GAMES.filter(g => g.id !== game.id && g.vibes.some(v => game.vibes.includes(v))).slice(0, 3);
-    return [gameResult(env, game, directLink), ...related.map(g => gameResult(env, g, directLink))];
-  }
-
-  // 9. FUZZY — частичное совпадение по названиям
-  const fuzzy = INLINE_GAMES.filter(g => norm(g.title).includes(q) || g.id.includes(q));
-  if (fuzzy.length) return fuzzy.slice(0, 6).map(g => gameResult(env, g, directLink));
-
-  // 10. Ничего не нашли → помощь + invite
-  return [helpResult(env, directLink), inviteResult(env, directLink)];
+  // 6. Ничего не подошло → стандартная выдача (4 утилиты)
+  return [
+    inviteResult(env, directLink),
+    coinResult(env, directLink),
+    diceResult(env, 5,  directLink),
+    diceResult(env, 10, directLink),
+  ];
 }
