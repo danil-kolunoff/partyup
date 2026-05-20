@@ -1379,6 +1379,31 @@ async function handleWhoAmI(request, env) {
   });
 }
 
+// Публичный профиль произвольного юзера: только безопасные поля + базовые
+// статы. Возвращает 404 если юзера нет, или скрытые поля если приватность
+// (на будущее). Никаких telegram username / private fields.
+async function handlePublicUser(request, env, userId) {
+  if (!env.DB || !Number.isFinite(userId)) return corsJson({ error: 'bad_user' }, 400);
+  const u = await env.DB.prepare(
+    `SELECT tg_id, display_name, first_name, username, photo_url, premium_until, created_at
+     FROM users WHERE tg_id = ?`
+  ).bind(userId).first();
+  if (!u) return corsJson({ error: 'not_found' }, 404);
+  const stats = await getUserStats(env, userId);
+  return corsJson({
+    ok: true,
+    user: {
+      tg_id: u.tg_id,
+      name: u.display_name || u.first_name || (u.username ? `@${u.username}` : 'Игрок'),
+      username: u.username || null,
+      photo_url: u.photo_url || null,
+      premium: Number(u.premium_until || 0) > now(),
+      member_since: u.created_at || null,
+    },
+    stats,
+  });
+}
+
 async function handleMe(request, env) {
   const { userId, anonId } = await resolveCaller(request, env);
   if (userId) {
@@ -3944,6 +3969,12 @@ export default {
     if (url.pathname === '/api/auth/start' && method === 'POST') return handleAuthStart(request, env);
     if (url.pathname === '/api/auth/poll' && method === 'GET') return handleAuthPoll(request, env);
     if (url.pathname === '/api/me' && method === 'GET') return handleMe(request, env);
+    // Профиль другого юзера (минимальный) — для внутреннего просмотра
+    // (не раскрываем приватные поля). Используется при тапе на аватар.
+    {
+      const m = url.pathname.match(/^\/api\/user\/(\d+)$/);
+      if (m && method === 'GET') return handlePublicUser(request, env, Number(m[1]));
+    }
     if (url.pathname === '/api/whoami' && method === 'GET') return handleWhoAmI(request, env);
     if (url.pathname === '/api/me/update' && method === 'POST') return handleMeUpdate(request, env);
     if (url.pathname === '/api/track' && method === 'POST') return handleTrack(request, env);

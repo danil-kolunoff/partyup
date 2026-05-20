@@ -38,6 +38,7 @@ export const api = {
     return get(`/api/auth/poll?${q}`);
   },
   me: () => get('/api/me'),
+  user: (id) => get(`/api/user/${id}`),
   updateMe: (payload) => post('/api/me/update', payload),
   track: (events) => post('/api/track', Array.isArray(events) ? { events } : events),
   startSession: (payload) => post('/api/session/start', payload),

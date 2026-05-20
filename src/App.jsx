@@ -188,6 +188,7 @@ const SCREENS = {
   LOBBY: 'lobby', ROUND: 'round', RESULTS: 'results',
   SETTINGS: 'settings', PROFILE: 'profile',
   JOIN_ROOM: 'joinRoom',
+  VIEWED_PROFILE: 'viewedProfile',
 }
 
 // Bottom nav видна только на табах верхнего уровня; во время игры/настройки игры — скрыта.
@@ -646,24 +647,27 @@ export default function App() {
     haptic(); ev.gameSelect(gameId); navigate(SCREENS.DETAIL, gameId)
   }, [haptic, navigate, roomId, isMultiplayer, lastPlayScreen])
 
-  // Универсальный обработчик клика по аватарке игрока в лобби/раунде.
-  // ВАЖНО: клик по СВОЕЙ аватарке всегда открывает профиль (в т.ч. в
-  // локальной игре, где у меня нет telegramId — там определяемся через
-  // myPlayerId). Чужие с username → TG-чат, иначе мини-модалка.
+  // Универсальный обработчик клика по аватарке игрока в лобби/раунде/итогах.
+  // СВОЁ → SCREENS.PROFILE (мой профиль). Чужое → SCREENS.VIEWED_PROFILE
+  // (внутренний просмотр чужого профиля со статистикой). Никаких переходов
+  // в Telegram.
   const handlePlayerAvatarClick = useCallback((p) => {
     if (!p) return
-    // ВСЕГДА открываем компактную модалку профиля (свой или чужой), чтобы не
-    // уводить игрока в полноэкранный SCREENS.PROFILE с кнопкой "Вернуться в игру"
-    // — это сбивало с толку и могло запускать ненужную игру. Для своего профиля
-    // в модалке доступна кнопка "Открыть мой профиль" → SCREENS.PROFILE.
     const myTg = auth?.tgUser?.id ?? auth?.user?.tg_id ?? null
     const isMeByTg = myTg != null && (
       (p.telegramId != null && Number(p.telegramId) === Number(myTg)) ||
       (p.userId != null && Number(p.userId) === Number(myTg))
     )
     const isMeById = myPlayerId && p.id && String(p.id) === String(myPlayerId)
-    setViewedPlayer({ ...p, _isMe: !!(isMeByTg || isMeById) })
-  }, [auth, myPlayerId])
+    if (isMeByTg || isMeById) {
+      setProfileFromGame(true)
+      navigate(SCREENS.PROFILE)
+      return
+    }
+    // Для чужого игрока — открываем внутренний полноэкранный профиль
+    setViewedPlayer(p)
+    navigate(SCREENS.VIEWED_PROFILE)
+  }, [auth, myPlayerId, navigate])
 
   const createLobby = useCallback(async (names, mode, gameOverride) => {
     // Защита: запускающий не может стартовать игру с премиум-вайбом, который
@@ -1097,6 +1101,7 @@ export default function App() {
           <FriendsScreen
             focusJoinInput={focusJoinInput}
             onClearFocus={() => setFocusJoinInput(false)}
+            onOpenPlayer={(p) => { setViewedPlayer(p); navigate(SCREENS.VIEWED_PROFILE) }}
             onJoinRoom={async (code) => {
               const newCode = code.toUpperCase()
               // Если уже в комнате — автоматически выходим из неё, потом
@@ -1294,6 +1299,8 @@ export default function App() {
             } : null}
             onOpenPremium={() => setShowPremium(true)}
           />}
+        {screen === SCREENS.VIEWED_PROFILE &&
+          <ViewedProfileScreen player={viewedPlayer} onBack={() => { setViewedPlayer(null); goBack() }}/>}
         {screen === SCREENS.JOIN_ROOM &&
           <JoinRoomScreen
             roomId={roomId}
@@ -1374,11 +1381,7 @@ export default function App() {
       )}
 
       {showWelcome && <WelcomeModal onClose={dismissWelcome} />}
-      {viewedPlayer && <ViewedPlayerModal
-        player={viewedPlayer}
-        onClose={() => setViewedPlayer(null)}
-        onOpenMyProfile={() => { setProfileFromGame(true); navigate(SCREENS.PROFILE) }}
-      />}
+      {/* ViewedPlayerModal удалён — переход на внутренний SCREENS.VIEWED_PROFILE */}
       {buyVibe && (
         <PackPurchaseModal
           vibe={buyVibe}
@@ -2584,7 +2587,7 @@ function CreateLobbyScreen({ picker, setPicker, settings, setSettings, myName, o
 }
 
 /* ─── FriendsScreen — приглашение + список соигроков ─────────────────────── */
-function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
+function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom, onOpenPlayer }) {
   const PAGE = 20
   const [friends, setFriends] = useState([])
   const [total, setTotal] = useState(0)
@@ -2623,12 +2626,19 @@ function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
     await doInviteShare({ deeplink, text, kind: 'invite', evName: 'friends_invite' })
   }
 
-  const dmFriend = (username) => {
-    if (!username) return
-    const tg = window.Telegram?.WebApp
-    const link = `https://t.me/${username}`
-    if (tg?.openTelegramLink) tg.openTelegramLink(link)
-    else window.open(link, '_blank')
+  // Открываем внутренний профиль игрока (никаких внешних TG-ссылок).
+  // Доступно ТОЛЬКО для TG-юзеров (есть user_id) — у гостей профиля нет.
+  const openInternalProfile = (f) => {
+    if (!f?.user_id) return
+    onOpenPlayer?.({
+      id: `tg_${f.user_id}`,
+      userId: f.user_id,
+      telegramId: f.user_id,
+      name: f.display_name || (f.username ? `@${f.username}` : 'Игрок'),
+      username: f.username || null,
+      photo_url: f.photo_url || null,
+      emoji: f.emoji || '🎮',
+    })
   }
 
   return (
@@ -2693,11 +2703,13 @@ function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom }) {
               const displayName = f.display_name || (f.username ? `@${f.username}` : null) || 'Гость'
               const initial = (displayName || f.emoji || '?').slice(0, 1).toUpperCase()
               const isGuest = !!f.is_guest
-              const tappable = !!f.username
+              const tappable = !!f.user_id // открываем профиль только для TG-юзеров
               return (
                 <button key={key} className="friend-row"
-                  onClick={() => tappable && dmFriend(f.username)}
-                  title={tappable ? `Открыть чат с @${f.username}` : (isGuest ? 'Гостевой игрок (без Telegram)' : '')}>
+                  onClick={() => tappable && openInternalProfile(f)}
+                  title={tappable ? 'Открыть профиль игрока' : (isGuest ? 'Гостевой игрок — профиль недоступен' : '')}
+                  disabled={!tappable}
+                  style={{cursor: tappable ? 'pointer' : 'default', opacity: tappable ? 1 : 0.7}}>
                   <div className="friend-avatar">
                     {f.photo_url
                       ? <img src={f.photo_url} alt="" referrerPolicy="no-referrer"/>
@@ -6585,6 +6597,114 @@ const ADMIN_TG_ID = 265489213
 function isAdminAuth(auth) {
   const id = auth?.tgUser?.id ?? auth?.user?.tg_id
   return Number(id) === ADMIN_TG_ID
+}
+
+/* ─── ViewedProfileScreen — внутренний просмотр чужого профиля ──────────
+   Берёт минимум данных из `player` (имя/аватар), подгружает stats c сервера.
+   Никаких ссылок на TG, никакой кнопки "Открыть в Telegram". */
+function ViewedProfileScreen({ player, onBack }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    let cancelled = false
+    const userId = player?.userId || player?.telegramId || null
+    if (!userId) { setLoading(false); return }
+    api.user(userId).then(r => {
+      if (cancelled) return
+      setData(r && r.ok ? { user: r.user, stats: r.stats } : null)
+      setLoading(false)
+    }).catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [player])
+
+  if (!player) {
+    return (
+      <div>
+        <div className="screen-top-bar">
+          <button className="screen-back-btn" onClick={onBack}><ArrowLeft size={16}/> Назад</button>
+        </div>
+        <p className="muted" style={{textAlign:'center', marginTop:40}}>Игрок не выбран</p>
+      </div>
+    )
+  }
+
+  const photo = data?.user?.photo_url || player.photo_url || null
+  const name = data?.user?.name || player.name || 'Игрок'
+  const isPremium = !!(data?.user?.premium || player.premium)
+  const stats = data?.stats || null
+  const memberSince = data?.user?.member_since
+    ? new Date(data.user.member_since).toLocaleDateString('ru-RU', { year: 'numeric', month: 'long' })
+    : null
+
+  return (
+    <div>
+      <div className="screen-top-bar">
+        <button className="screen-back-btn" onClick={onBack}><ArrowLeft size={16}/> Назад</button>
+      </div>
+
+      <p className="eyebrow"><Users size={13}/> Профиль игрока</p>
+      <h2 style={{marginBottom: 14}}>{name}</h2>
+
+      <div className="card profile-card" style={{marginBottom: 12}}>
+        <div className="profile-row">
+          <div className="profile-avatar">
+            {photo
+              ? <img src={photo} alt="" referrerPolicy="no-referrer"/>
+              : <span className="profile-avatar-initials">{(player.emoji || name.slice(0,1).toUpperCase())}</span>}
+          </div>
+          <div className="profile-info">
+            <div className="profile-name">{name}</div>
+            {memberSince && (
+              <div className="profile-status">
+                <Clock size={12} color="var(--muted)"/> На PartyUp с {memberSince}
+              </div>
+            )}
+            {isPremium && (
+              <div className="premium-badge" style={{pointerEvents:'none'}}>
+                <Sparkles size={11}/>
+                <span className="premium-badge-text">PartyUp <span className="premium-glow">Premium</span></span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {loading && <div className="profile-empty">Загружаем статистику…</div>}
+
+      {!loading && !stats && (
+        <div className="profile-empty">
+          У этого игрока пока нет публичной статистики. Сыграйте вместе — она появится здесь.
+        </div>
+      )}
+
+      {!loading && stats && (() => {
+        const total = Number(stats?.total_sessions || 0)
+        const finished = Number(stats?.finished_sessions || 0)
+        const minutes = Math.round(Number(stats?.total_seconds || 0) / 60)
+        const rounds = Number(stats?.total_rounds || 0)
+        const totalScore = Number(stats?.total_score || 0)
+        const rooms = Number(stats?.rooms || 0)
+        if (total === 0) {
+          return <div className="profile-empty">У этого игрока пока нет сыгранных партий.</div>
+        }
+        // Самая необходимая статистика — 6 цифр в 2 ряда.
+        return (
+          <div className="profile-stats-wrap">
+            <div className="profile-stats">
+              <div className="profile-stat"><b>{total}</b><span>сессий</span></div>
+              <div className="profile-stat"><b>{finished}</b><span>завершено</span></div>
+              <div className="profile-stat"><b>{minutes}</b><span>минут</span></div>
+            </div>
+            <div className="profile-stats">
+              <div className="profile-stat"><b>{rounds}</b><span>раундов</span></div>
+              <div className="profile-stat"><b>{totalScore}</b><span>очков</span></div>
+              <div className="profile-stat"><b>{rooms}</b><span>комнат</span></div>
+            </div>
+          </div>
+        )
+      })()}
+    </div>
+  )
 }
 
 function ProfileScreen({ auth, onReturnToGame, onOpenPremium }) {
