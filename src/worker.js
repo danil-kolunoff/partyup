@@ -3905,6 +3905,7 @@ async function handleCreateInvoice(request, env) {
       payload: `sub:${sub.id}:${userId}`,
       currency: 'XTR',
       prices: [{ label: sub.title, amount: sub.price_stars }],
+      subscription_period: 2592000, // 30 дней — recurring Stars subscription
     });
     if (!inv?.ok) return corsJson({ error: 'invoice_failed', detail: inv }, 500);
     return corsJson({ ok: true, invoiceUrl: inv.result });

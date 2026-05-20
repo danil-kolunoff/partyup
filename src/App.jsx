@@ -4488,6 +4488,16 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
   const progressPct = Math.max(0, Math.min(100, (timeLeft / ROUND_SEC) * 100))
   const urgentTime = timeLeft <= 10
 
+  // Warning-вибрация ОДИН раз при переходе через 10-секундный порог
+  const warnedRef = useRef(false)
+  useEffect(() => { if (phase !== 'playing') warnedRef.current = false }, [phase])
+  useEffect(() => {
+    if (phase === 'playing' && timeLeft === 10 && !warnedRef.current) {
+      warnedRef.current = true
+      haptic?.('warning')
+    }
+  }, [timeLeft, phase, haptic])
+
   const syncState = async (patch) => {
     if (!isMultiplayer || !roomId) return
     const next = { phase, startedAt, wordIdx, score, ...patch }
@@ -5414,6 +5424,16 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
   const urgentTime = timeLeft <= 10
   // Прогресс-бар вместо «прыгающего» текста — плавная анимация по CSS.
   const progressPct = Math.max(0, Math.min(100, (timeLeft / ROUND_SEC) * 100))
+
+  // Warning-вибрация ОДИН раз при переходе через 10-секундный порог
+  const warnedRef = useRef(false)
+  useEffect(() => { if (phase !== 'playing') warnedRef.current = false }, [phase])
+  useEffect(() => {
+    if (phase === 'playing' && timeLeft === 10 && !warnedRef.current) {
+      warnedRef.current = true
+      haptic?.('warning')
+    }
+  }, [timeLeft, phase, haptic])
 
   return (
     <div>
