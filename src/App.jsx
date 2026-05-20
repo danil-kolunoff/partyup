@@ -3489,16 +3489,19 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
   )
 }
 
-/* ─── GamePickerModal — компактная сетка ВСЕХ игр, в один тап ───────────── */
+/* ─── GamePickerModal — полноразмерная модалка со ВСЕМИ играми. ───────────── */
 function GamePickerModal({ currentId, onPick, onClose }) {
   // Показываем все игры из каталога — список актуализируется из админки.
   const items = GAMES
   return (
     <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Сменить игру">
-      <div className="welcome-modal vibe-picker-modal" onClick={e => e.stopPropagation()}>
+      {/* welcome-modal (без vibe-picker-modal) даёт полноразмерную модалку
+          с тем же скроллом и max-height, что и Premium-модалка — все 9 игр
+          вмещаются и при необходимости скроллятся внутри. */}
+      <div className="welcome-modal game-picker-modal" onClick={e => e.stopPropagation()}>
         <p className="eyebrow" style={{justifyContent: 'center'}}><Dices size={13}/> Сменить игру</p>
         <h2 className="gradient-text" style={{textAlign: 'center', margin: '4px 0 14px'}}>Во что играем?</h2>
-        <div className="vibe-picker-grid">
+        <div className="game-picker-grid">
           {items.map(g => (
             <button
               key={g.id}
@@ -3896,6 +3899,41 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
     no:  Object.values(votes).filter(v => v === 'no').length,
   }
 
+  // ── Per-client commit голосов в pu_never_stats ────────────────────────
+  // Проблема: раньше pu_never_stats обновлял ТОЛЬКО клиент, нажавший
+  // «Следующий» (хост). Гости приходили на финиш с пустым localStorage и
+  // видели «0 признаний — не голосовал». Теперь КАЖДЫЙ клиент сам
+  // фиксирует голоса раунда:
+  //   • lastVotesRef держит последний снэпшот votes раунда (видимый всем
+  //     через polling).
+  //   • При смене roundIndex (новый раунд начался) — commit предыдущих
+  //     голосов в свой pu_never_stats.
+  // committedRef гарантирует один коммит на раунд (защита от двойного
+  // сохранения у хоста — он же и handleNext вызывает).
+  const lastVotesRef = useRef({})
+  const committedRef = useRef(new Set())
+  useEffect(() => {
+    if (votes && Object.keys(votes).length > 0) lastVotesRef.current = { ...votes }
+  }, [votes])
+  // Коммитим как только локально посчитано everyoneVoted — НЕ ждём смены
+  // roundIndex (иначе теряем последний раунд партии перед переходом на RESULTS).
+  useEffect(() => {
+    if (!everyoneVoted) return
+    if (committedRef.current.has(roundIndex)) return
+    committedRef.current.add(roundIndex)
+    try {
+      const prev = JSON.parse(localStorage.getItem('pu_never_stats') || '{}')
+      for (const p of players) {
+        const v = votes[p.id]
+        if (!v) continue
+        prev[p.id] = prev[p.id] || { yes: 0, no: 0, name: p.name }
+        prev[p.id][v] += 1
+        prev[p.id].name = p.name
+      }
+      localStorage.setItem('pu_never_stats', JSON.stringify(prev))
+    } catch {}
+  }, [everyoneVoted, roundIndex, players, votes])
+
   const submitVote = async (val) => {
     if (myVote || !myId) return
     haptic('impact')
@@ -3912,20 +3950,9 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
   }
 
   const handleNext = async () => {
-    // Сохраняем фин-результаты раунда (для общей статистики "Я никогда не").
-    try {
-      const prev = JSON.parse(localStorage.getItem('pu_never_stats') || '{}')
-      for (const p of players) {
-        const v = votes[p.id]
-        if (!v) continue
-        prev[p.id] = prev[p.id] || { yes: 0, no: 0, name: p.name }
-        prev[p.id][v] += 1
-        prev[p.id].name = p.name // обновляем имя
-      }
-      localStorage.setItem('pu_never_stats', JSON.stringify(prev))
-    } catch {}
-    // Не обнуляем здесь — App.nextRound сделает setRoomRoundState(null) одновременно
-    // со сменой roundIndex; иначе UI на 1 кадр показывает «голосование» в чистом виде.
+    // pu_never_stats теперь обновляется в useEffect выше — у каждого клиента
+    // независимо, как только все проголосовали. handleNext только продвигает
+    // раунд.
     onNext()
   }
 
@@ -6777,47 +6804,15 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         </div>
       )}
 
-      {/* Статистика "Я никогда не…" — кто сколько Было / Не было нажал */}
-      {game.id === 'never' && (() => {
-        let stats = {}
-        try { stats = JSON.parse(localStorage.getItem('pu_never_stats') || '{}') } catch {}
-        const rows = players.map(p => ({
-          ...p,
-          yes: Number(stats[p.id]?.yes || 0),
-          no:  Number(stats[p.id]?.no  || 0),
-        })).filter(r => r.yes + r.no > 0)
-        if (!rows.length) return null
-        rows.sort((a, b) => b.yes - a.yes)
-        return (
-          <div className="never-stats-card">
-            <div className="never-stats-title">🙋 Кто что делал</div>
-            <div className="never-stats-list">
-              {rows.map(r => {
-                const total = r.yes + r.no
-                const pct = total ? Math.round((r.yes / total) * 100) : 0
-                return (
-                  <div key={r.id} className="never-stats-row">
-                    <PlayerAvatar player={r} auth={null} myId={null} size={36} className="never-stats-avatar"/>
-                    <div className="never-stats-info">
-                      <div className="never-stats-name">{r.name}</div>
-                      <div className="never-stats-bar"><div className="never-stats-fill" style={{width: pct + '%'}}/></div>
-                    </div>
-                    <div className="never-stats-counts">
-                      <span title="Было">🙋 {r.yes}</span>
-                      <span title="Не было">🙅 {r.no}</span>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )
-      })()}
-
       {/* Единый рейтинг 2-5 место. 1-е уже в большой winner-card сверху.
-          row.detail внутри каждой карточки уже содержит реальную статистику
-          игрока — отдельный блок «Факты партии» убран как дублирующий. */}
-      <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
+          row.detail внутри каждой карточки содержит реальную статистику
+          игрока — отдельный блок «Факты партии» убран как дублирующий.
+          Для «Я никогда не…» рейтинг и спец-блок «🙋 Кто что делал»
+          скрыты по запросу — у игры одного числа (всего «было» признаний)
+          достаточно, оно уже в winner-card. */}
+      {game.id !== 'never' && (
+        <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
+      )}
 
       {/* Share block — компактнее, в стилистике карточки */}
       <div className="share-card share-card-v2" style={{marginTop: 18}}>
@@ -6829,30 +6824,22 @@ const podiumMedals = ['🏆', '🥈', '🥉']
       </div>
 
       {/* Action buttons.
-          В мультиплеере решает только хост — у гостей кнопки disabled
-          (и подписаны, что ждём лидера). Лидер выбирает: вернуться в то же
-          лобби (с тем же roomId, чтобы продолжать с теми же людьми) или
-          начать заново эту игру. */}
+          «Начать новую игру» остаётся за хостом — это пересоздаёт партию
+          в той же комнате. «Вернуться в лобби» доступна всем: партия уже
+          завершена (state='ended'), и любой может перевести комнату обратно
+          в state='lobby' — DO синхронизирует это всем через polling. */}
       <div className="results-actions">
         <button
           className="btn-primary no-pulse"
           disabled={isMultiplayer && !isHost}
-          onClick={onAgain}
-          title={isMultiplayer && !isHost ? 'Решение за хостом' : undefined}>
+          onClick={onAgain}>
           <RotateCcw size={16}/> Начать новую игру
         </button>
         <button
           className="btn-secondary"
-          disabled={isMultiplayer && !isHost}
-          onClick={onBackToLobby || onHome}
-          title={isMultiplayer && !isHost ? 'Решение за хостом' : undefined}>
+          onClick={onBackToLobby || onHome}>
           <Users size={16}/> Вернуться в лобби
         </button>
-        {isMultiplayer && !isHost && (
-          <div className="muted" style={{textAlign: 'center', marginTop: 6, fontSize: 12}}>
-            <Clock size={11} style={{verticalAlign: '-1px'}}/> Ждём решение хоста…
-          </div>
-        )}
       </div>
     </div>
   )

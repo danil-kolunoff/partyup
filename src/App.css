@@ -3101,12 +3101,21 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 
 .share-card-v2 { padding: 18px 18px 16px; }
 
-/* Vibe / Game picker modal — компактный bottom-sheet, не на весь экран */
+/* Vibe picker modal — компактный bottom-sheet, не на весь экран */
 .vibe-picker-modal {
   padding: 18px 16px 16px;
   max-width: 460px;
   width: 100%;
   border-radius: 22px 22px var(--r-2xl) var(--r-2xl);
+}
+/* Game picker modal — полноразмерная, наследует .welcome-modal (skip
+   bottom-sheet сжатия), сетка 3×N с теми же tile, что и vibe-picker. */
+.game-picker-modal { max-width: 520px; }
+.game-picker-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
+@media (max-width: 380px) {
+  .game-picker-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .vibe-picker-modal h2 { font-size: 19px; }
 .vibe-picker-modal .lead { font-size: 13px; margin-bottom: 14px; }
