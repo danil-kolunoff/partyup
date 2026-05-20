@@ -1187,7 +1187,9 @@ export default function App() {
               setPendingMode(null)
               setPlayerNames(names); setGameMode(mode); createLobby(names, mode)
             }}
-            onBack={() => { setPendingMode(null); goBack() }}
+            // «Выйти из игры» — явно на страницу игр (а не в историю, иначе
+            // возвращает на DetailScreen и пользователь видит то же самое).
+            onBack={() => { setPendingMode(null); setLastPlayScreen(SCREENS.GAMES); navigate(SCREENS.GAMES) }}
           />}
         {screen === SCREENS.LOBBY &&
           <LobbyScreen game={selectedGame} players={players} room={room}
@@ -3500,10 +3502,9 @@ function GamePickerModal({ currentId, onPick, onClose }) {
   // Показываем все игры из каталога — список актуализируется из админки.
   const items = GAMES
   return (
-    <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Сменить игру">
-      {/* welcome-modal (без vibe-picker-modal) даёт полноразмерную модалку
-          с тем же скроллом и max-height, что и Premium-модалка — все 9 игр
-          вмещаются и при необходимости скроллятся внутри. */}
+    // modal-backdrop по умолчанию center-aligned (а не bottom-sheet welcome-
+    // backdrop), это даёт модалке нормальное центрирование на телефоне.
+    <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Сменить игру">
       <div className="welcome-modal game-picker-modal" onClick={e => e.stopPropagation()}>
         <p className="eyebrow" style={{justifyContent: 'center'}}><Dices size={13}/> Сменить игру</p>
         <h2 className="gradient-text" style={{textAlign: 'center', margin: '4px 0 14px'}}>Во что играем?</h2>
@@ -6829,12 +6830,48 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         </div>
       )}
 
-      {/* Единый рейтинг 2-5 место. 1-е уже в большой winner-card сверху.
-          row.detail внутри каждой карточки содержит реальную статистику
-          игрока — отдельный блок «Факты партии» убран как дублирующий.
-          Для «Я никогда не…» рейтинг и спец-блок «🙋 Кто что делал»
-          скрыты по запросу — у игры одного числа (всего «было» признаний)
-          достаточно, оно уже в winner-card. */}
+      {/* Для «Я никогда не…» — компактный список всех игроков с балансом
+          «было / не было» и шкалой (вместо обычного RatingList). Это та
+          самая «статистика других игроков», которую важно видеть после
+          игры — в одиночке и в мультиплеере. */}
+      {game.id === 'never' && (() => {
+        let stats = {}
+        try { stats = JSON.parse(localStorage.getItem('pu_never_stats') || '{}') } catch {}
+        const rows = players.map(p => ({
+          ...p,
+          yes: Number(stats[p.id]?.yes || 0),
+          no:  Number(stats[p.id]?.no  || 0),
+        })).filter(r => r.yes + r.no > 0)
+        if (!rows.length) return null
+        rows.sort((a, b) => b.yes - a.yes)
+        return (
+          <div className="never-stats-card">
+            <div className="never-stats-title">🙋 Кто что делал</div>
+            <div className="never-stats-list">
+              {rows.map(r => {
+                const total = r.yes + r.no
+                const pct = total ? Math.round((r.yes / total) * 100) : 0
+                return (
+                  <div key={r.id} className="never-stats-row">
+                    <PlayerAvatar player={r} auth={null} myId={null} size={36} className="never-stats-avatar"/>
+                    <div className="never-stats-info">
+                      <div className="never-stats-name">{r.name}</div>
+                      <div className="never-stats-bar"><div className="never-stats-fill" style={{width: pct + '%'}}/></div>
+                    </div>
+                    <div className="never-stats-counts">
+                      <span title="Было">🙋 {r.yes}</span>
+                      <span title="Не было">🙅 {r.no}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Единый рейтинг 2-5 место для остальных игр. Для never рейтинг
+          скрыт — выше уже специальный блок «🙋 Кто что делал». */}
       {game.id !== 'never' && (
         <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
       )}

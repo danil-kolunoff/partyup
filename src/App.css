@@ -3108,15 +3108,35 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   width: 100%;
   border-radius: 22px 22px var(--r-2xl) var(--r-2xl);
 }
-/* Game picker modal — полноразмерная, наследует .welcome-modal (skip
-   bottom-sheet сжатия), сетка 3×N с теми же tile, что и vibe-picker. */
-.game-picker-modal { max-width: 520px; }
+/* Game picker modal — компактная и помещается на всех телефонах.
+   Используем welcome-modal как базу (скролл внутри, max-height от dvh),
+   плюс свои переопределения: меньший padding, плотный grid с автоподбором
+   колонок, компактные tile. */
+.game-picker-modal {
+  max-width: 520px;
+  padding: 22px 18px 18px;
+  /* Подстраховка от слишком высокой модалки на маленьких экранах. */
+  max-height: 88dvh;
+}
+@media (max-height: 700px) {
+  .game-picker-modal { padding: 16px 14px 14px; max-height: 92dvh; }
+}
+/* Auto-fit: 3 колонки на широких, 2 — на узких, без media-query. minmax
+   гарантирует, что tile никогда не уже 92px (читаемость иконки/label). */
 .game-picker-grid {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
 }
-@media (max-width: 380px) {
-  .game-picker-grid { grid-template-columns: repeat(2, 1fr); }
+/* Компактный tile внутри game-picker — меньше «воздуха», но всё читаемо. */
+.game-picker-modal .vibe-picker-tile {
+  padding: 10px 8px 9px;
+  min-height: 88px;
+  gap: 3px;
 }
+.game-picker-modal .vibe-picker-icon { width: 32px; height: 32px; }
+.game-picker-modal .vibe-picker-label { font-size: 12px; line-height: 1.2; }
+.game-picker-modal .vibe-picker-hint { font-size: 10px; line-height: 1.2; }
 .vibe-picker-modal h2 { font-size: 19px; }
 .vibe-picker-modal .lead { font-size: 13px; margin-bottom: 14px; }
 .vibe-picker-grid {
