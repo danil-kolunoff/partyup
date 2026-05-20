@@ -3864,3 +3864,140 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 }
 /* Стабилизация карточки слова — без scaleIn-анимации на каждом ренейме */
 .crocodile-word-display { animation: none; }
+
+/* Multi-axis settings card (для игр с rounds + timer): разделитель между
+   осями внутри одной карточки. */
+.setup-axis-tabs-row.has-divider {
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 4px;
+  padding-top: 12px;
+}
+
+/* ─── Alias v2 ─────────────────────────────────────────────────────────── */
+.alias-turn-card {
+  display: flex; align-items: center; gap: 12px;
+  margin: 14px 0 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--s2);
+  border: 1px solid var(--border);
+}
+.alias-turn-info { flex: 1; min-width: 0; }
+.alias-turn-name { font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.2; }
+.alias-turn-sub {
+  font-size: 12px; color: var(--accent-2);
+  text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700;
+  margin-top: 3px;
+}
+.alias-turn-counter {
+  display: inline-flex; align-items: baseline;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(167,139,250,0.10);
+  border: 1px solid rgba(167,139,250,0.20);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+.alias-turn-counter-cur { font-size: 22px; color: var(--accent-2); line-height: 1; }
+.alias-turn-counter-slash { font-size: 14px; color: var(--muted); margin: 0 2px; }
+.alias-turn-counter-total { font-size: 14px; color: var(--muted); }
+
+.alias-rules-card {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0 0 6px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(167,139,250,0.05);
+  border: 1px solid rgba(167,139,250,0.14);
+}
+.alias-rules-icon {
+  width: 38px; height: 38px;
+  border-radius: 999px;
+  display: grid; place-items: center;
+  background: rgba(167,139,250,0.12);
+  color: var(--accent-2);
+  flex-shrink: 0;
+}
+.alias-rules-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
+.alias-rules-sub { font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+.alias-word-card-v2 {
+  margin: 14px 0 12px;
+  padding: 36px 24px;
+  text-align: center;
+  border-radius: 22px;
+  background: linear-gradient(135deg, rgba(167,139,250,0.10), rgba(99,102,241,0.05));
+  border: 1.5px solid rgba(167,139,250,0.30);
+  box-shadow: 0 6px 26px rgba(99,102,241,0.18);
+  position: relative; overflow: hidden;
+}
+.alias-word-card-v2::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(120% 60% at 50% 0%, rgba(167,139,250,0.20), transparent 70%);
+  pointer-events: none;
+}
+.alias-word-card-spectator {
+  background: rgba(255,255,255,0.02);
+  border-color: rgba(255,255,255,0.06);
+  box-shadow: none;
+}
+.alias-word-v2 {
+  position: relative;
+  font-size: 32px; font-weight: 800;
+  color: var(--text); letter-spacing: -0.01em;
+  line-height: 1.2;
+  margin-bottom: 8px;
+}
+.alias-word-progress {
+  position: relative;
+  font-size: 11px; color: var(--muted);
+  letter-spacing: 0.06em; text-transform: uppercase; font-weight: 700;
+}
+
+.alias-counters {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  margin-bottom: 4px;
+}
+.alias-counter {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--s2);
+  border: 1px solid var(--border);
+}
+.alias-counter-ok   { color: #34d399; }
+.alias-counter-skip { color: #fbbf24; }
+.alias-counter-n {
+  font-size: 20px; font-weight: 800;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.alias-counter-lbl {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700;
+}
+
+.alias-result-card-v2 {
+  text-align: center;
+  padding: 28px 20px 24px;
+  margin: 16px 0;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(48,209,88,0.08), rgba(167,139,250,0.06));
+  border: 1px solid rgba(48,209,88,0.20);
+}
+.alias-result-emoji { font-size: 48px; line-height: 1; margin-bottom: 8px; }
+.alias-result-score-v2 {
+  font-size: 56px; font-weight: 900;
+  color: #34d399;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.alias-result-label-v2 {
+  font-size: 14px; color: var(--text); font-weight: 600;
+  margin-top: 4px;
+}
+.alias-result-meta {
+  font-size: 12px; color: var(--muted);
+  margin-top: 10px;
+  display: flex; flex-direction: column; gap: 3px;
+}

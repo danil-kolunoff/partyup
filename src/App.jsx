@@ -462,7 +462,12 @@ export default function App() {
     createPlayer({ id: 'sasha', name: 'Саша', emoji: '🎧', ready: true }),
   ]
   const everyoneReady = players.every(p => p.ready)
-  const totalRounds = settings.rounds  // e.g. 3,5,6,10 — NOT prompt array length
+  // Для большинства игр totalRounds = settings.rounds. Для Элиаса —
+  // settings.rounds означает «раундов НА ИГРОКА», так что суммарное число
+  // ходов = N × players.length.
+  const totalRounds = selectedGame?.id === 'alias'
+    ? Math.max(1, settings.rounds) * Math.max(1, players.length)
+    : settings.rounds
   const currentRound = useMemo(
     () => createRound(
       selectedGame, roundIndex, players, picker.vibe,
@@ -1426,7 +1431,7 @@ const GAME_LOBBY_SCHEMA = {
   whoofus:      [['rounds', 'Голосований', [5, 8, 12, 16]]],
   five:         [['rounds', 'Раундов', [5, 8, 12]], ['timer', 'Секунд на ответ', [5, 7, 10]]],
   crocodile:    [['rounds', 'Карточек в партии', [25, 50, 100]], ['timer', 'Секунд на показ', [30, 60, 90]]],
-  alias:        [['rounds', 'Раундов на команду', [3, 5, 8]], ['timer', 'Секунд на ход', [30, 45, 60]], ['goal', 'Очков до победы', [25, 40, 60]]],
+  alias:        [['rounds', 'Кол-во раундов', [5, 10, 15]], ['timer', 'Секунд на ход', [30, 45, 60]]],
   whoami:       [['rounds', 'Персонажей на игрока', [1, 2, 3]]],
   associations: [['rounds', 'Слов в цепочке', [5, 8, 12, 16]]],
   would_rather: [['rounds', 'Дилемм в партии', [10, 15, 25, 40]]],
@@ -1475,39 +1480,48 @@ function GameLobbySettings({ game, settings, setSettings, haptic }) {
   )
 }
 
-// Селектор количества карточек для PlayerSetup. Используется и в lobby через
-// GameLobbySettings — оба теперь рендерятся одинаковым стилем.
+// Селектор настроек партии. Читает GAME_LOBBY_SCHEMA и рендерит все оси
+// (rounds, timer, ...) одинаковым стилем — карточка с лейблом + таб-кнопки.
+// Используется и в PlayerSetup, и в LobbyScreen.
 function CardCountSelector({ game, settings, setSettings, style }) {
-  // Универсальный выбор: 25/50/100 карточек для всех игр (единый UX).
-  // Игре-зависимый лейбл оставляем — где-то это «карточек», где-то «вопросов».
-  const opts = [25, 50, 100]
-  const label = ['never','whoofus'].includes(game?.id)
-    ? 'Вопросов' : 'Карточек'
-  // По умолчанию выбирается наименьшее значение (если текущее не в списке опций).
+  const schema = GAME_LOBBY_SCHEMA[game?.id] || [['rounds', 'Карточек в партии', [25, 50, 100]]]
+  const ICONS = { rounds: Layers, timer: Timer, goal: Trophy }
+
+  // При смене игры — нормализуем все оси к дефолтам схемы (первое значение).
   useEffect(() => {
     setSettings(s => {
-      const cur = s?.rounds
-      if (cur == null || !opts.includes(cur)) return { ...s, rounds: opts[0] }
-      return s
+      const next = { ...s }
+      let changed = false
+      for (const [key, , opts] of schema) {
+        if (next[key] == null || !opts.includes(next[key])) {
+          next[key] = opts[0]; changed = true
+        }
+      }
+      return changed ? next : s
     })
   }, [game?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const current = settings?.rounds ?? opts[0]
   return (
     <div className="setup-axis-card" style={style}>
-      <div className="setup-axis-tabs-row">
-        <div className="setup-axis-key"><Layers size={16}/> {label}</div>
-        <div className="setup-axis-tabs">
-          {opts.map(n => (
-            <button key={n}
-              className={`setup-axis-tab ${current === n ? 'is-active' : ''}`}
-              aria-pressed={current === n}
-              onClick={() => setSettings(s => ({ ...s, rounds: n }))}>
-              {n}
-            </button>
-          ))}
-        </div>
-      </div>
+      {schema.map(([key, label, opts], i) => {
+        const Icon = ICONS[key] || Layers
+        const current = settings?.[key] ?? opts[0]
+        return (
+          <div key={key} className={`setup-axis-tabs-row ${i > 0 ? 'has-divider' : ''}`}>
+            <div className="setup-axis-key"><Icon size={16}/> {label}</div>
+            <div className="setup-axis-tabs">
+              {opts.map(n => (
+                <button key={n}
+                  className={`setup-axis-tab ${current === n ? 'is-active' : ''}`}
+                  aria-pressed={current === n}
+                  onClick={() => setSettings(s => ({ ...s, [key]: n }))}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -4414,14 +4428,22 @@ function SpyRound({ game, round, roundIndex, total, players, onNext, onEnd, hapt
 }
 
 /* ─── AliasRound ─────────────────────────────────────────────────────────── */
-function AliasRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth }) {
-  // Один игрок объясняет слова из deck — остальные угадывают вслух.
-  // В MP активный игрок (по индексу) видит слова и кнопки «Угадали / Пропустить»,
-  // таймер синхронен. Очки идут в личный счёт активного игрока.
+function AliasRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth, settings }) {
+  // Каждый игрок получает фиксированное число раундов (settings.rounds).
+  // За один раунд: показывается набор слов; за каждое «Угадали» +1 балл
+  // объясняющему, «Пропустить» — следующее слово без штрафа.
+  // Когда все раунды у всех игроков отыграны → финальный экран.
   const activePlayer = players[roundIndex % players.length]
   const isExplainer = !isMultiplayer || (myId && String(activePlayer.id) === String(myId))
   const words = game.samplePrompts || []
 
+  // Настройки игры (берутся из лобби; default 30s, 5 раундов/игрока).
+  const ROUND_SEC = Number(settings?.timer) || 30
+  const ROUNDS_PER_PLAYER = Math.max(1, Number(settings?.rounds) || 5)
+  // Сколько ход для активного игрока (1-based, 1..ROUNDS_PER_PLAYER).
+  const playerTurn = Math.floor(roundIndex / Math.max(1, players.length)) + 1
+
+  // MP-state синкается через roomRoundState, local через useState.
   const mpPhase = roomRoundState?.phase || 'ready'
   const mpStartedAt = roomRoundState?.startedAt || 0
   const mpWordIdx = roomRoundState?.wordIdx || 0
@@ -4430,18 +4452,12 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
   const [localStartedAt, setLocalStartedAt] = useState(0)
   const [localWordIdx, setLocalWordIdx] = useState(0)
   const [localScore, setLocalScore] = useState({ correct: 0, skipped: 0 })
-  // Локальный буфер прироста для batch'инга (только в MP). На каждое
-  // нажатие "Угадали/Пропустить" обновляем буфер мгновенно — отображение
-  // плавное; в DO отсылаем agg раз в N (debounce) ИЛИ принудительно в
-  // done/handleNext. До этого момента счёт у остальных может отставать
-  // на ~500 мс — это ОК для "Элиаса", где счётчик не критичен.
+  // Локальный буфер для batch'инга (только MP, у explainer'а).
   const [localBufScore, setLocalBufScore] = useState({ correct: 0, skipped: 0 })
   const [localBufWordIdx, setLocalBufWordIdx] = useState(0)
   const aliasFlushTimer = useRef(null)
   const phase = isMultiplayer ? mpPhase : localPhase
   const startedAt = isMultiplayer ? mpStartedAt : localStartedAt
-  // wordIdx + score берём из локального буфера у объясняющего (мгновенный отклик),
-  // у остальных — из mpScore/mpWordIdx (что приехало с сервера).
   const wordIdx = isMultiplayer
     ? (isExplainer ? Math.max(mpWordIdx, localBufWordIdx) : mpWordIdx)
     : localWordIdx
@@ -4452,7 +4468,15 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
         : mpScore)
     : localScore
 
-  const ROUND_SEC = 60
+  // Reset локальных state при новом раунде (когда roundIndex меняется).
+  useEffect(() => {
+    setLocalPhase('ready'); setLocalStartedAt(0); setLocalWordIdx(0)
+    setLocalScore({ correct: 0, skipped: 0 })
+    setLocalBufScore({ correct: 0, skipped: 0 }); setLocalBufWordIdx(0)
+    if (aliasFlushTimer.current) { clearTimeout(aliasFlushTimer.current); aliasFlushTimer.current = null }
+  }, [roundIndex])
+
+  // Таймер: тикает раз в 250мс пока phase=playing
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (phase !== 'playing' || !startedAt) return
@@ -4461,6 +4485,8 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
   }, [phase, startedAt])
   const elapsed = startedAt ? (now - startedAt) / 1000 : 0
   const timeLeft = Math.max(0, Math.ceil(ROUND_SEC - elapsed))
+  const progressPct = Math.max(0, Math.min(100, (timeLeft / ROUND_SEC) * 100))
+  const urgentTime = timeLeft <= 10
 
   const syncState = async (patch) => {
     if (!isMultiplayer || !roomId) return
@@ -4471,7 +4497,6 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
       body: JSON.stringify({ round: next }) }) } catch {}
   }
 
-  // Сбросить буфер на сервер (вызывается debounce'нуто и принудительно).
   const flushAliasBuf = async () => {
     if (!isMultiplayer || !isExplainer || !roomId) return
     if (localBufScore.correct === 0 && localBufScore.skipped === 0 && localBufWordIdx === 0) return
@@ -4484,20 +4509,21 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     await syncState({ score: merged, wordIdx: ni })
   }
 
-  // Авто-переход playing → done. При переходе обязательно flush'им буфер.
+  // Авто-переход playing → done. Защищаем флагом от write-loop'а.
+  const autoTransitFiredRef = useRef(false)
+  useEffect(() => { if (phase !== 'playing') autoTransitFiredRef.current = false }, [phase])
   useEffect(() => {
-    if (phase !== 'playing' || !startedAt) return
+    if (phase !== 'playing' || !startedAt || autoTransitFiredRef.current) return
     if (elapsed >= ROUND_SEC) {
+      autoTransitFiredRef.current = true
       if (isMultiplayer && isExplainer) {
-        // Финальный flush — гарантия что результат раунда не теряется.
         if (aliasFlushTimer.current) { clearTimeout(aliasFlushTimer.current); aliasFlushTimer.current = null }
         flushAliasBuf().then(() => syncState({ phase: 'done' }))
       } else if (!isMultiplayer) setLocalPhase('done')
       haptic?.('success')
     }
-  }, [elapsed, phase, startedAt, isMultiplayer, isExplainer]) // eslint-disable-line
+  }, [elapsed, phase, startedAt, isMultiplayer, isExplainer, ROUND_SEC]) // eslint-disable-line
 
-  // Cleanup при размонтировании — гарантия flush'а если игрок свернул.
   useEffect(() => {
     return () => {
       if (aliasFlushTimer.current) { clearTimeout(aliasFlushTimer.current); flushAliasBuf().catch(() => {}) }
@@ -4505,6 +4531,8 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
   }, []) // eslint-disable-line
 
   const startGame = async () => {
+    haptic('impact')
+    autoTransitFiredRef.current = false
     const ts = Date.now()
     if (isMultiplayer && isExplainer) {
       await syncState({ phase: 'playing', startedAt: ts, wordIdx: 0, score: { correct: 0, skipped: 0 } })
@@ -4512,8 +4540,7 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
       setLocalPhase('playing'); setLocalStartedAt(ts); setLocalWordIdx(0); setLocalScore({ correct: 0, skipped: 0 })
     }
   }
-  // Локально мгновенно обновляем буфер; debounce flush в DO раз в 1.2 с —
-  // вместо 5-10 POST'ов за 60-сек раунд получаем 1-2 batch'а + финальный.
+
   const scheduleAliasFlush = () => {
     if (aliasFlushTimer.current) clearTimeout(aliasFlushTimer.current)
     aliasFlushTimer.current = setTimeout(() => { flushAliasBuf().catch(() => {}) }, 1200)
@@ -4542,91 +4569,151 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     }
   }
 
+  // Защита от двойного advance
+  const advancingRef = useRef(false)
+  useEffect(() => { advancingRef.current = false }, [roundIndex])
   const handleNext = async () => {
+    if (advancingRef.current) return
+    advancingRef.current = true
     if (score.correct > 0) recordRoundScore?.({ [activePlayer.id]: score.correct })
     if (isMultiplayer && roomId) {
       onRoundStateSync?.(null)
       try { await fetch(`/api/room/${roomId}/action`, { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ round: null }) }) } catch {}
-    } else {
-      setLocalPhase('ready'); setLocalScore({ correct: 0, skipped: 0 }); setLocalWordIdx(0)
     }
     onNext()
   }
-  const urgentTime = timeLeft <= 10
 
   return (
     <div>
       <RoundHeader game={game} roundIndex={roundIndex} total={total} />
-      <div className="active-player-banner">
-        <PlayerAvatar player={activePlayer} auth={auth} myId={myId} size={48}/>
-        <div>
-          <div className="active-player-name">{activePlayer.name}</div>
-          <div className="active-player-sub">{isExplainer ? 'твой ход — объясняй' : 'объясняет'}</div>
+
+      {/* Заголовок: чей ход + личный счётчик раундов */}
+      <div className="alias-turn-card">
+        <PlayerAvatar player={activePlayer} auth={auth} myId={myId} size={56}/>
+        <div className="alias-turn-info">
+          <div className="alias-turn-name">{activePlayer.name}</div>
+          <div className="alias-turn-sub">
+            {isExplainer ? 'твой ход — объясняй' : 'объясняет'}
+          </div>
+        </div>
+        <div className="alias-turn-counter" title="Раундов у этого игрока">
+          <span className="alias-turn-counter-cur">{playerTurn}</span>
+          <span className="alias-turn-counter-slash">/</span>
+          <span className="alias-turn-counter-total">{ROUNDS_PER_PLAYER}</span>
         </div>
       </div>
 
+      {/* ── READY ── */}
       {phase === 'ready' && isExplainer && (
         <>
           <div className="alias-rules-card">
-            <p className="eyebrow"><MessageCircle size={12}/> Правила</p>
-            <p style={{fontSize:14,color:'var(--muted)',marginTop:8,lineHeight:1.6}}>
-              Объясняй слова за 60 секунд.<br/>
-              Нельзя называть однокоренные слова.<br/>
-              Остальные угадывают вслух.
-            </p>
+            <div className="alias-rules-icon"><MessageCircle size={18}/></div>
+            <div className="alias-rules-body">
+              <div className="alias-rules-title">Объясняй слова за {ROUND_SEC} секунд</div>
+              <div className="alias-rules-sub">
+                Нельзя называть однокоренные слова. Остальные угадывают вслух.
+              </div>
+            </div>
           </div>
-          <button className="btn-primary mt-16" onClick={startGame}><Play size={17}/> Старт!</button>
+          <button className="btn-primary mt-16" onClick={startGame}>
+            <Play size={17}/> Старт! ({ROUND_SEC} сек)
+          </button>
         </>
       )}
       {phase === 'ready' && !isExplainer && (
         <div className="alias-rules-card">
-          <p className="eyebrow"><MessageCircle size={12}/> Угадывайте</p>
-          <p style={{fontSize:14,color:'var(--muted)',marginTop:8,lineHeight:1.6}}>
-            {activePlayer.name} будет объяснять слова — угадывайте вслух.
-          </p>
-          <div className="mp-waiting-hint" style={{marginTop:12}}>
-            <Clock size={14}/> Ждём «Старт» от {activePlayer.name}
+          <div className="alias-rules-icon"><MessageCircle size={18}/></div>
+          <div className="alias-rules-body">
+            <div className="alias-rules-title">{activePlayer.name} объясняет</div>
+            <div className="alias-rules-sub">Угадывайте вслух — все вместе!</div>
           </div>
         </div>
       )}
+      {phase === 'ready' && !isExplainer && (
+        <div className="mp-waiting-hint mt-16">
+          <Clock size={14}/> Ждём «Старт» от {activePlayer.name}
+        </div>
+      )}
 
+      {/* ── PLAYING ── */}
       {phase === 'playing' && (
         <>
-          <div className={`alias-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}с</div>
+          {/* Таймер + прогресс-бар */}
+          <div className="croc-timer-wrap">
+            <div className={`croc-timer ${urgentTime ? 'urgent' : ''}`}>
+              {timeLeft}<span className="croc-timer-unit">с</span>
+            </div>
+            <div className="croc-timer-bar">
+              <div className="croc-timer-bar-fill"
+                style={{width: progressPct + '%', transition: 'width 0.25s linear'}}/>
+            </div>
+          </div>
+
+          {/* Карточка со словом */}
           {isExplainer ? (
-            <div className="alias-word-card" key={wordIdx}>
-              <div className="alias-word">{words[wordIdx % words.length]?.text || '—'}</div>
+            <div className="alias-word-card-v2" key={wordIdx}>
+              <div className="alias-word-v2">{words[wordIdx % words.length]?.text || '—'}</div>
+              <div className="alias-word-progress">слово #{wordIdx + 1}</div>
             </div>
           ) : (
-            <div className="alias-word-card">
-              <div className="alias-word" style={{fontSize:48}}>🗣️</div>
-              <div className="crocodile-hint">Угадывайте вслух!</div>
+            <div className="alias-word-card-v2 alias-word-card-spectator">
+              <div className="alias-word-v2" style={{fontSize:56}}>🗣️</div>
+              <div className="alias-word-progress">Угадывайте вслух!</div>
             </div>
           )}
-          <div className="alias-score-row">
-            <span className="alias-score-correct">✅ {score.correct}</span>
-            <span className="alias-score-skipped">⏭️ {score.skipped}</span>
+
+          {/* Индикаторы счёта */}
+          <div className="alias-counters">
+            <div className="alias-counter alias-counter-ok">
+              <Check size={16}/>
+              <span className="alias-counter-n">{score.correct}</span>
+              <span className="alias-counter-lbl">угадано</span>
+            </div>
+            <div className="alias-counter alias-counter-skip">
+              <ChevronRight size={16}/>
+              <span className="alias-counter-n">{score.skipped}</span>
+              <span className="alias-counter-lbl">пропущено</span>
+            </div>
           </div>
+
+          {/* Кнопки действия — только у объясняющего */}
           {isExplainer && (
-            <div className="alias-action-row">
-              <button className="alias-btn-correct" onClick={correct}><Check size={20}/> Угадали</button>
-              <button className="alias-btn-skip" onClick={skip}><ChevronRight size={20}/> Пропустить</button>
+            <div className="five-result-btns" style={{marginTop:18}}>
+              <button className="five-btn-success" onClick={correct}>
+                <Check size={20}/> Угадали
+              </button>
+              <button className="five-btn-fail" onClick={skip}>
+                <ChevronRight size={20}/> Пропустить
+              </button>
             </div>
           )}
         </>
       )}
 
+      {/* ── DONE ── */}
       {phase === 'done' && (
         <>
-          <div className="alias-result-card">
-            <div className="alias-result-score">{score.correct}</div>
-            <div className="alias-result-label">слов угадано</div>
-            {score.skipped > 0 && <div style={{fontSize:13,color:'var(--muted)',marginTop:4}}>пропущено: {score.skipped}</div>}
+          <div className="alias-result-card-v2">
+            <div className="alias-result-emoji">{score.correct >= 5 ? '🎉' : score.correct >= 3 ? '👏' : '👌'}</div>
+            <div className="alias-result-score-v2">+{score.correct}</div>
+            <div className="alias-result-label-v2">
+              {score.correct === 1 ? 'слово' : score.correct < 5 ? 'слова' : 'слов'} угадано
+            </div>
+            <div className="alias-result-meta">
+              {score.skipped > 0 && <span>⏭ Пропущено: {score.skipped}</span>}
+              <span>· У {activePlayer.name} {Math.max(0, ROUNDS_PER_PLAYER - playerTurn)} ход{
+                (ROUNDS_PER_PLAYER - playerTurn) === 1 ? '' : 'а'} осталось</span>
+            </div>
           </div>
           {(isExplainer || !isMultiplayer) ? (
-            <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+            <button className="btn-primary no-pulse mt-16"
+              onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
+              {roundIndex >= total - 1
+                ? <><Trophy size={17}/> Итоги</>
+                : <><ChevronRight size={17}/> Следующий ход</>}
+            </button>
           ) : (
             <div className="mp-waiting-hint mt-16">
               <Clock size={14}/> Ждём «Следующий» от {activePlayer.name}
@@ -5305,8 +5392,11 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
     }
   }
 
-  // Защита от двойных нажатий (отправляем nextRound один раз)
+  // Защита от двойных нажатий (отправляем nextRound один раз).
+  // ВАЖНО: сбрасываем флаг при смене roundIndex — иначе следующий раунд
+  // не сможет нажать "Угадали/Не угадали".
   const advancingRef = useRef(false)
+  useEffect(() => { advancingRef.current = false }, [roundIndex])
   const handleGuessed = async () => {
     if (advancingRef.current) return
     advancingRef.current = true
