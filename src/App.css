@@ -399,7 +399,22 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   padding: 32px 24px 28px;
   box-shadow: var(--shadow-lg);
   animation: slideUp var(--slow) var(--spring) both;
-  position: relative; overflow: hidden;
+  position: relative;
+  /* Скроллим контент внутри модалки на маленьких экранах, чтобы кнопки и
+     длинный текст (Premium, VibePicker) всегда оставались доступны. */
+  max-height: calc(100dvh - 64px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+/* Скрываем скроллбар, чтобы не ломать дизайн (контент по-прежнему скроллится). */
+.welcome-modal::-webkit-scrollbar { width: 0; height: 0; }
+.welcome-modal { scrollbar-width: none; }
+/* На очень маленьких высотах поджимаем верхний/нижний padding, чтобы
+   контент вмещался без скролла. */
+@media (max-height: 640px) {
+  .welcome-modal { padding: 20px 20px 18px; max-height: calc(100dvh - 24px); }
 }
 .welcome-modal::before {
   content: '';
@@ -3536,7 +3551,8 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
   position: relative;
   padding: 28px 24px;
   text-align: center;
-  overflow: hidden;
+  /* Скролл наследуется от .welcome-modal — не перегружаем overflow:hidden,
+     иначе на маленьких телефонах низ карточки (цена + кнопка) не виден. */
 }
 .premium-modal-glow {
   position: absolute; inset: -50% -50% auto auto;

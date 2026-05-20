@@ -694,7 +694,11 @@ export default function App() {
       // Multiplayer: create room on server, only host player
       const newRoomId = Math.random().toString(36).slice(2, 8).toUpperCase()
       const tgU = tgUser()
-      const hostId = tgU?.id || myPlayerId
+      // hostId ДОЛЖЕН совпадать с player.id одного из игроков (а это myPlayerId,
+      // UUID-строка). Если поставить сюда tgU.id (число), enrichPlayers сравнит
+      // числовой hostId со строковым player.id и НИКОГДА не выставит isHost=true —
+      // в лобби у всех появится бейдж «Готов» вместо «Хост» у создателя.
+      const hostId = myPlayerId
       const hostPlayer = createPlayer({
         id: myPlayerId,
         name: names[0],
@@ -2688,6 +2692,14 @@ function FriendsScreen({ focusJoinInput, onClearFocus, onJoinRoom, onOpenPlayer 
               value={code}
               onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))}
               onKeyDown={e => { if (e.key === 'Enter') tryJoin() }}
+              onFocus={(e) => {
+                // На мобильных клавиатура поднимается ~300мс и закрывает поле.
+                // Прокручиваем input в видимую часть после открытия клавиатуры.
+                const el = e.currentTarget
+                setTimeout(() => {
+                  try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch {}
+                }, 350)
+              }}
               maxLength={8}
               autoCapitalize="characters"
             />
@@ -3156,11 +3168,15 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
           onChangeGame(serverRoom.gameId)
         }
         // Хост поменял настройки (rounds/vibe) — гости подтягивают локально.
+        // ВАЖНО: вайб подтягиваем ТОЛЬКО пока state==='lobby'. После старта
+        // игры deck зафиксирован, и менять локальный vibe нельзя — иначе
+        // карточки/фильтрация разойдутся между игроками (см. createRound).
         if (serverRoom.settings && !isHost) {
           if (typeof serverRoom.settings.rounds === 'number' && serverRoom.settings.rounds !== settings?.rounds) {
             setSettings(s => ({ ...s, rounds: serverRoom.settings.rounds }))
           }
-          if (serverRoom.settings.vibe && serverRoom.settings.vibe !== currentVibe && onChangeVibe) {
+          const inLobby = (serverRoom.state || 'lobby') === 'lobby'
+          if (inLobby && serverRoom.settings.vibe && serverRoom.settings.vibe !== currentVibe && onChangeVibe) {
             onChangeVibe(serverRoom.settings.vibe)
           }
         }
@@ -3334,12 +3350,23 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
       {(!isMultiplayer || isHost) ? (
         <div className="lobby-axis-stack">
           <div className="setup-axis-card">
-            <button className="setup-axis-row" onClick={() => setShowVibe(true)}>
+            {/* Вайб ЛОКАЕМ после старта игры — иначе deck (зафиксированный в DO)
+                разойдётся со свежим фильтром и игроки увидят разные карточки. */}
+            <button
+              className={`setup-axis-row ${room?.state === 'playing' ? 'is-locked' : ''}`}
+              onClick={() => {
+                if (room?.state === 'playing') { haptic?.('warning'); return }
+                setShowVibe(true)
+              }}
+              aria-disabled={room?.state === 'playing'}
+              title={room?.state === 'playing' ? 'Вайб зафиксирован на время партии' : undefined}
+            >
               <div className="setup-axis-key">
                 <VibeIcon vibeId={currentVibe} size={16}/> Вайб
               </div>
               <div className="setup-axis-val">
-                {VIBES.find(v => v.id === currentVibe)?.label || 'Разогрев'} <ChevronRight size={14}/>
+                {VIBES.find(v => v.id === currentVibe)?.label || 'Разогрев'}
+                {room?.state === 'playing' ? <Lock size={13}/> : <ChevronRight size={14}/>}
               </div>
             </button>
           </div>
@@ -3405,9 +3432,10 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
   )
 }
 
-/* ─── GamePickerModal — компактная сетка простых игр, в один тап ────────── */
+/* ─── GamePickerModal — компактная сетка ВСЕХ игр, в один тап ───────────── */
 function GamePickerModal({ currentId, onPick, onClose }) {
-  const items = GAMES.filter(g => g.simple)
+  // Показываем все игры из каталога — список актуализируется из админки.
+  const items = GAMES
   return (
     <div className="modal-backdrop welcome-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Сменить игру">
       <div className="welcome-modal vibe-picker-modal" onClick={e => e.stopPropagation()}>
@@ -3694,7 +3722,10 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
     const ms = Math.max(0, Date.now() - (turnStartRef.current || Date.now()))
     if (isMultiplayer && roomId && activePlayer?.id) {
       setBusy(true)
-      onRoundStateSync?.(null)
+      // НЕ обнуляем roomRoundState здесь: смена roundIndex в App.nextRound
+      // (см. setRoundIndex; setRoomRoundState(null)) сделает это атомарно
+      // с переходом на новый раунд. Иначе на 1 кадр всплывают кнопки выбора
+      // прошлого раунда — пользователь видит мерцание.
       try {
         const nextIdx = roundIndex + 1
         const isLast = nextIdx >= total
@@ -3824,7 +3855,8 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
       }
       localStorage.setItem('pu_never_stats', JSON.stringify(prev))
     } catch {}
-    onRoundStateSync?.(null) // очищаем перед следующим
+    // Не обнуляем здесь — App.nextRound сделает setRoomRoundState(null) одновременно
+    // со сменой roundIndex; иначе UI на 1 кадр показывает «голосование» в чистом виде.
     onNext()
   }
 
@@ -4039,7 +4071,7 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
       }
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
-    onRoundStateSync?.(null)
+    // App.nextRound сам обнулит roomRoundState при смене roundIndex.
     onNext()
   }
 
@@ -4207,11 +4239,9 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
     recordRoundScore?.({ [activePlayer.id]: 1 })
     recordResult(true)
     if (isMultiplayer && roomId) {
-      onRoundStateSync?.(null)
-      try { await fetch(`/api/room/${roomId}/action`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ round: null }),
-      }) } catch {}
+      // НЕ обнуляем roomRoundState отдельно — App.nextRound сделает это
+      // атомарно при смене roundIndex (избегаем мерцания «ready» на 1 кадр).
+      // Сервер сам сбросит round при смене roundIndex (см. /action в worker.js).
     } else {
       setLocalPhase('ready'); setLocalStartedAt(0); setLocalResult(null)
     }
@@ -4221,11 +4251,7 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
     haptic('impact')
     recordResult(false)
     if (isMultiplayer && roomId) {
-      onRoundStateSync?.(null)
-      try { await fetch(`/api/room/${roomId}/action`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ round: null }),
-      }) } catch {}
+      // см. handleSuccess — DO сам сбросит round при смене roundIndex.
     } else {
       setLocalPhase('ready'); setLocalStartedAt(0); setLocalResult(null)
     }
@@ -4587,10 +4613,8 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     advancingRef.current = true
     if (score.correct > 0) recordRoundScore?.({ [activePlayer.id]: score.correct })
     if (isMultiplayer && roomId) {
-      onRoundStateSync?.(null)
-      try { await fetch(`/api/room/${roomId}/action`, { method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ round: null }) }) } catch {}
+      // DO сам обнулит round при смене roundIndex; не дёргаем roomRoundState(null)
+      // здесь, чтобы не было мерцания «pre-start» экрана на следующий 1 кадр.
     }
     onNext()
   }
@@ -5393,10 +5417,9 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
 
   const reset = async () => {
     if (isMultiplayer && roomId) {
-      onRoundStateSync?.(null)
-      try { await fetch(`/api/room/${roomId}/action`, { method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ round: null }) }) } catch {}
+      // DO сам обнулит round при смене roundIndex (это делается следующим
+      // POST'ом roundIndex). roomRoundState(null) НЕ делаем тут — иначе
+      // на 1 кадр всплывёт «pre-start» экран между двумя раундами.
     } else {
       setLocalPhase('ready'); setLocalStartedAt(0)
     }
@@ -5736,7 +5759,7 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
       }
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
-    onRoundStateSync?.(null)
+    // App.nextRound сам обнулит roomRoundState при смене roundIndex.
     onNext()
   }
 

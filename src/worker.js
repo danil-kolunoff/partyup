@@ -904,9 +904,13 @@ export class GameRoom {
     if (method === 'GET' && url.pathname === '/state') {
       const room = await this.state.storage.get('room');
       if (!room) return corsJson({ error: 'room_not_found' }, 404);
-      // Heartbeat + sweep мёртвых клиентов (30с TTL). Делаем перед ETag,
+      // Heartbeat + sweep мёртвых клиентов (5 минут TTL). Делаем перед ETag,
       // чтобы клиенты получили актуальный список после удаления.
-      const PLAYER_TTL_MS = 30000;
+      // 5 минут — компромисс: достаточно, чтобы пережить временную потерю связи
+      // (метро, лифт, фоновая вкладка), но не настолько долго, чтобы зомби-
+      // игроки тянули комнату пустой. Polling клиента стучит каждые 2–3с, так
+      // что живые игроки никогда не приближаются к этому порогу.
+      const PLAYER_TTL_MS = 5 * 60 * 1000;
       let mutated = false;
       if (!room.lastSeen) room.lastSeen = {};
       if (pid) { room.lastSeen[pid] = ts; mutated = true; }
@@ -1043,8 +1047,15 @@ export class GameRoom {
       }
       // Хост поменял настройки (rounds/vibe) — патчим room.settings и
       // увеличиваем version, гости подтянут через poll.
+      // ВАЖНО: вайб ЛОКАЕМ на старте игры. После state!=='lobby' deck уже
+      // зафиксирован под исходный вайб; смена вайба на лету десинхронит карточки
+      // между игроками (host собирает по новому vibe, гости — по старому deck).
       if (body.settings && typeof body.settings === 'object') {
-        room.settings = { ...(room.settings || {}), ...body.settings };
+        const incoming = { ...body.settings };
+        if (room.state && room.state !== 'lobby' && 'vibe' in incoming) {
+          delete incoming.vibe; // игнорируем — игра уже идёт
+        }
+        room.settings = { ...(room.settings || {}), ...incoming };
       }
       // Хост зафиксировал deck (массив карточек). Все клиенты будут читать
       // одну и ту же карточку по индексу — гарантия синхрона + refresh-safe.

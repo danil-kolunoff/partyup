@@ -9,10 +9,10 @@ export const PLAYER_PRESETS = [
 // пак не куплен; покупка через Telegram Stars (см. /api/payments/invoice).
 export const VIBES = [
   { id: 'warmup',       label: 'Разогрев',    icon: '✨', hint: 'быстрый старт' },
-  { id: 'funny',        label: 'Смешной',     icon: '😂', hint: 'больше смеха' },
+  { id: 'funny',        label: 'Смешной',     icon: '😂', hint: 'больше фана' },
   { id: 'family',       label: 'Семейный',    icon: '🏠', hint: 'для всех возрастов' },
   { id: 'new_people',   label: 'Новые люди',  icon: '🤝', hint: 'познакомиться' },
-  { id: 'deep',         label: 'Близкие',     icon: '❤️', hint: 'глубже' },
+  { id: 'deep',         label: 'Близкие',     icon: '❤️', hint: 'личные вопросы' },
   { id: 'teambuilding', label: 'Тимбилдинг',  icon: '💼', hint: 'для коллег', premium: true, packId: 'pack_teambuilding', priceStars: 99 },
   { id: 'cringe',       label: 'Кринж',       icon: '🤡', hint: 'неловкие моменты', premium: true, packId: 'pack_cringe', priceStars: 99 },
   { id: 'adult',        label: '18+',         icon: '🔞', hint: 'горячие вопросы' },
