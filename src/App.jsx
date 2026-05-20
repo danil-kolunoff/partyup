@@ -4042,7 +4042,33 @@ function NeverHaveILocal({ game, round, roundIndex, total, players, onNext, onEn
       return n
     })
   }
-  const handleNext = () => { setConfessed(new Set()); onNext() }
+  const commitRoundStats = () => {
+    // Финальная статистика для ResultsScreen: confessed → yes, остальные → no.
+    // Раньше в single-player ветке этого не было совсем, и на финиш-экране
+    // pu_never_stats был пустой → winner-card показывал «не голосовал».
+    try {
+      const k = 'pu_never_stats'
+      const prev = JSON.parse(localStorage.getItem(k) || '{}')
+      for (const p of players) {
+        prev[p.id] = prev[p.id] || { yes: 0, no: 0, name: p.name }
+        if (confessed.has(p.id)) prev[p.id].yes += 1
+        else prev[p.id].no += 1
+        prev[p.id].name = p.name
+      }
+      localStorage.setItem(k, JSON.stringify(prev))
+    } catch {}
+  }
+  const handleNext = () => {
+    commitRoundStats()
+    setConfessed(new Set())
+    onNext()
+  }
+  // Важно: на последнем раунде NextRoundBtn вызывает onEnd напрямую — нужно
+  // тоже зафиксировать stats этого раунда, иначе он теряется (как раньше).
+  const handleEnd = () => {
+    commitRoundStats()
+    onEnd()
+  }
   return (
     <div>
       <RoundHeader game={game} roundIndex={roundIndex} total={total} />
@@ -4066,7 +4092,7 @@ function NeverHaveILocal({ game, round, roundIndex, total, players, onNext, onEn
           🙋 {confessed.size} из {players.length} признались
         </div>
       )}
-      <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+      <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={handleEnd}/>
     </div>
   )
 }
