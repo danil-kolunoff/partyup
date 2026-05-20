@@ -6562,132 +6562,6 @@ function computeGameRanking(players, scores, game) {
   return { rows, unit }
 }
 
-// Презентационные «факты партии» для каждой игры — массив чипов с метрикой
-// и подписью. Возвращает [] если данных недостаточно (например, никто не играл).
-// Эти чипы рендерятся в `GameStatsBlock` под winner-card.
-function gameFunFacts(players, scores, game) {
-  const id = game?.id
-  const byId = (pid) => players.find(p => String(p.id) === String(pid))?.name || '—'
-  const out = []
-  if (id === 'alias') {
-    const s = loadGameStats('pu_alias_stats')
-    let totalCorrect = 0, totalSkipped = 0
-    let bestRound = { v: 0, pid: null }
-    for (const [pid, r] of Object.entries(s)) {
-      totalCorrect += Number(r.totalCorrect || 0)
-      totalSkipped += Number(r.totalSkipped || 0)
-      if (Number(r.bestRound || 0) > bestRound.v) bestRound = { v: Number(r.bestRound), pid }
-    }
-    if (totalCorrect > 0) out.push({ icon: '🎯', value: totalCorrect, label: 'слов объяснено за партию' })
-    if (bestRound.v > 0) out.push({ icon: '🚀', value: bestRound.v, label: `лучший раунд — ${byId(bestRound.pid)}` })
-    if (totalSkipped > 0) out.push({ icon: '⏭️', value: totalSkipped, label: 'пропущено' })
-  } else if (id === 'crocodile') {
-    const s = loadGameStats('pu_croco_stats')
-    let guessed = 0, missed = 0, best = { v: 0, pid: null }
-    for (const [pid, r] of Object.entries(s)) {
-      guessed += Number(r.guessed || 0)
-      missed += Number(r.missed || 0)
-      if (Number(r.guessed || 0) > best.v) best = { v: Number(r.guessed), pid }
-    }
-    if (guessed > 0) out.push({ icon: '🎭', value: guessed, label: 'угадано слов' })
-    if (missed > 0) out.push({ icon: '🤐', value: missed, label: 'не угадано' })
-    if (best.v > 0) out.push({ icon: '🏆', value: best.v, label: `мастер вечера — ${byId(best.pid)}` })
-  } else if (id === 'whoami') {
-    const s = loadGameStats('pu_whoami_stats')
-    let wins = 0, total = 0, best = { v: 0, pid: null }
-    for (const [pid, r] of Object.entries(s)) {
-      wins += Number(r.wins || 0)
-      total += Number(r.totalPts || 0)
-      if (Number(r.bestPts || 0) > best.v) best = { v: Number(r.bestPts), pid }
-    }
-    if (wins > 0) out.push({ icon: '🎯', value: wins, label: 'персонажей угадано' })
-    if (total > 0) out.push({ icon: '⭐', value: total, label: 'всего очков' })
-    if (best.v > 0) out.push({ icon: '🧠', value: `+${best.v}`, label: `самая быстрая отгадка — ${byId(best.pid)}` })
-  } else if (id === 'would_rather') {
-    const s = loadGameStats('pu_wr_stats')
-    let totalVotes = 0, withMaj = 0, maxAB = { a: 0, b: 0 }
-    for (const r of Object.values(s)) {
-      totalVotes += Number(r.total || 0)
-      withMaj += Number(r.majority || 0)
-      maxAB.a += Number(r.picksA || 0); maxAB.b += Number(r.picksB || 0)
-    }
-    if (totalVotes > 0) {
-      out.push({ icon: '🗳️', value: totalVotes, label: 'выборов сделано' })
-      const pct = Math.round((withMaj / totalVotes) * 100)
-      out.push({ icon: '🌊', value: `${pct}%`, label: 'попаданий в большинство' })
-      if (maxAB.a + maxAB.b > 0) out.push({ icon: '⚖️', value: `${maxAB.a}/${maxAB.b}`, label: 'выборы А / Б' })
-    }
-  } else if (id === 'never') {
-    const s = loadGameStats('pu_never_stats')
-    let yes = 0, no = 0
-    for (const r of Object.values(s)) { yes += Number(r.yes || 0); no += Number(r.no || 0) }
-    if (yes + no > 0) {
-      out.push({ icon: '🙋', value: yes, label: '«было» признаний' })
-      out.push({ icon: '🙅', value: no, label: '«не было»' })
-      const pct = Math.round((yes / (yes + no)) * 100)
-      out.push({ icon: '🔥', value: `${pct}%`, label: 'опыта всей компании' })
-    }
-  } else if (id === 'whoofus') {
-    const s = loadGameStats('pu_whoofus_stats')
-    let total = 0
-    for (const v of Object.values(s)) total += Number(v || 0)
-    if (total > 0) out.push({ icon: '🗳️', value: total, label: 'голосов отдано' })
-  } else if (id === 'five') {
-    const s = loadGameStats('pu_five_stats')
-    let suc = 0, fail = 0
-    for (const r of Object.values(s)) { suc += Number(r.success || 0); fail += Number(r.fail || 0) }
-    if (suc + fail > 0) {
-      out.push({ icon: '⚡', value: suc, label: 'успешных ответов' })
-      out.push({ icon: '🛑', value: fail, label: 'не уложились' })
-      const pct = Math.round((suc / (suc + fail)) * 100)
-      out.push({ icon: '🎯', value: `${pct}%`, label: 'точность компании' })
-    }
-  } else if (id === 'associations') {
-    const s = loadGameStats('pu_assoc_stats')
-    let total = 0
-    for (const v of Object.values(s)) total += Number(v || 0)
-    if (total > 0) out.push({ icon: '✨', value: total, label: 'совпадений в ассоциациях' })
-  } else if (id === 'truth') {
-    const s = loadGameStats('pu_truth_stats')
-    let totalT = 0, totalD = 0
-    let brave = { v: 0, pid: null }   // больше всех Действий
-    let open = { v: 0, pid: null }    // больше всех Правд
-    for (const [pid, r] of Object.entries(s)) {
-      const t = Number(r.truths || 0), d = Number(r.dares || 0)
-      totalT += t; totalD += d
-      if (d > brave.v) brave = { v: d, pid }
-      if (t > open.v) open = { v: t, pid }
-    }
-    if (totalT + totalD > 0) {
-      out.push({ icon: '🔥', value: totalD, label: 'выбрано «Действие»' })
-      out.push({ icon: '🎯', value: totalT, label: 'выбрано «Правда»' })
-      if (brave.v > 0) out.push({ icon: '😎', value: brave.v, label: `самый смелый — ${byId(brave.pid)}` })
-      if (open.v > 0 && open.pid !== brave.pid) out.push({ icon: '💬', value: open.v, label: `самый откровенный — ${byId(open.pid)}` })
-    }
-  }
-  return out
-}
-
-// Универсальный блок «факты партии» — небольшие чипы, без перегруза.
-function GameStatsBlock({ players, scores, game }) {
-  const facts = useMemo(() => gameFunFacts(players, scores, game), [players, scores, game])
-  if (!facts.length) return null
-  return (
-    <div className="game-stats-block">
-      <div className="game-stats-title">📊 Факты партии</div>
-      <div className="game-stats-grid">
-        {facts.map((f, i) => (
-          <div key={i} className="game-stats-chip">
-            <span className="game-stats-chip-icon" aria-hidden="true">{f.icon}</span>
-            <span className="game-stats-chip-value">{f.value}</span>
-            <span className="game-stats-chip-label">{f.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function RatingList({ players, scores, game, winnerId }) {
   const { rows, unit } = computeGameRanking(players, scores, game)
   // Кандидаты на места 2-5: всё после winnerId.
@@ -6695,20 +6569,19 @@ function RatingList({ players, scores, game, winnerId }) {
   if (!rest.length) return null
   const titles = GAME_PLACE_TITLES[game?.id] || DEFAULT_PLACE_TITLES
   const unitStr = (n) => typeof unit === 'function' ? unit(n) : `${n} ${unit}`
+  const isTruth = game?.id === 'truth'
   return (
     <div className="rating-list" style={{marginTop: 16}}>
-      <div className="rating-list-title">🏅 Рейтинг участников</div>
+      {/* Заголовок «🏅 Рейтинг участников» убран по запросу — это просто
+          компактный список карточек со статистикой каждого игрока. */}
       <div className="rating-list-items">
         {rest.map((p, i) => {
           const place = i + 2 // начинаем со 2-го места
           const t = titles[place - 1] || titles[titles.length - 1]
-          // Заголовок места (постоянный — «Второе место», «Третье место»...)
-          // + динамический sub: реальная статистика игрока из row.detail
-          // (например «12 действ. · 3 правд» вместо общей «Принял все вызовы»).
-          // detail приходит из computeGameRanking и описывает РЕАЛЬНУЮ
-          // статистику игрока («5 действ. · 2 правд», «12 объяснено · лучший
-          // раунд: 7» и т.д.) — это важнее статичных «принял все вызовы».
-          const sub = p.detail || t.sub || ''
+          // Для truth — справа компактно ДВА числа (правды + действия),
+          // sub под названием не дублируем (числа уже видны справа).
+          // Для остальных игр — стандартный score + sub из row.detail.
+          const sub = isTruth ? '' : (p.detail || t.sub || '')
           return (
             <div key={p.id} className={`rating-card rating-card-p${place}`}>
               <div className="rating-card-medal">{t.medal}<span className="rating-card-place">{place}</span></div>
@@ -6718,7 +6591,20 @@ function RatingList({ players, scores, game, winnerId }) {
                 <div className="rating-card-title">{t.title}</div>
                 {sub && <div className="rating-card-sub">{sub}</div>}
               </div>
-              <div className="rating-card-score">{unitStr(p.value)}</div>
+              {isTruth ? (
+                <div className="rating-card-score rating-card-score-dual">
+                  <span className="rcs-pill" data-side="truths" title="Правды">
+                    <b>{p._truths || 0}</b>
+                    <i>правд</i>
+                  </span>
+                  <span className="rcs-pill" data-side="dares" title="Действия">
+                    <b>{p._dares || 0}</b>
+                    <i>действ.</i>
+                  </span>
+                </div>
+              ) : (
+                <div className="rating-card-score">{unitStr(p.value)}</div>
+              )}
             </div>
           )
         })}
@@ -6770,8 +6656,21 @@ function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, 
     const unitFn = typeof rankedUnit === 'function' ? rankedUnit : (n) => `${n} ${rankedUnit}`
     rankedRows.forEach((p, i) => {
       const m = medals[i] || `${i+1}.`
-      const v = Number(p.value || 0)
-      lines.push(`${m} ${p.name}${v > 0 ? ` — ${unitFn(v)}` : ''}`)
+      let line
+      if (game.id === 'truth') {
+        // Для «Правда или действие» показываем оба числа — основной критерий
+        // (смелость) бессмысленно отдельно, важна пара «N действ. · M правд».
+        const d = Number(p._dares || 0), t = Number(p._truths || 0)
+        if (d + t > 0) {
+          line = `${m} ${p.name} — ${d} ${pluralRu(d,'действие','действия','действий')}, ${t} ${pluralRu(t,'правда','правды','правд')}`
+        } else {
+          line = `${m} ${p.name}`
+        }
+      } else {
+        const v = Number(p.value || 0)
+        line = `${m} ${p.name}${v > 0 ? ` — ${unitFn(v)}` : ''}`
+      }
+      lines.push(line)
     })
     const deeplink = miniAppLink(BOT_USERNAME, APP_SHORT_NAME, `g_${game.id}`) || 'https://partyup-game.ru'
     lines.push('', `🎮 Сыграйте вместе: ${deeplink}`)
@@ -6845,8 +6744,21 @@ const podiumMedals = ['🏆', '🥈', '🥉']
               <PlayerAvatar player={winner} auth={null} myId={null} size={96} className="winner-avatar"/>
             </div>
             <div className="winner-card-name">{winner.name}</div>
-            <div className="winner-card-tagline">{winnerSub}</div>
-            {winnerValue > 0 && (
+            {/* Для truth подзаголовок убран — внизу два чипа с реальными числами
+                (Правды + Действия). Для остальных игр остаётся обычный sub. */}
+            {game.id !== 'truth' && <div className="winner-card-tagline">{winnerSub}</div>}
+            {game.id === 'truth' ? (
+              <div className="winner-card-score winner-card-score-dual">
+                <div className="winner-score-pill" data-side="truths">
+                  <span className="winner-card-score-n">{winnerRow?._truths || 0}</span>
+                  <span className="winner-card-score-l">{pluralRu(winnerRow?._truths || 0, 'правда', 'правды', 'правд')}</span>
+                </div>
+                <div className="winner-score-pill" data-side="dares">
+                  <span className="winner-card-score-n">{winnerRow?._dares || 0}</span>
+                  <span className="winner-card-score-l">{pluralRu(winnerRow?._dares || 0, 'действие', 'действия', 'действий')}</span>
+                </div>
+              </div>
+            ) : (winnerValue > 0 && (
               <div className="winner-card-score">
                 <span className="winner-card-score-n">{winnerValue}</span>
                 <span className="winner-card-score-l">
@@ -6860,7 +6772,7 @@ const podiumMedals = ['🏆', '🥈', '🥉']
                   })()}
                 </span>
               </div>
-            )}
+            ))}
           </div>
         </div>
       )}
@@ -6902,15 +6814,9 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         )
       })()}
 
-      {/* «Факты партии» — единый блок мелких чипов с метриками. Для каждой игры
-          gameFunFacts() собирает 2–4 ключевые цифры (сколько слов угадано,
-          mvp раунда, % попаданий в большинство и т.д.). Если данных нет —
-          блок просто не рендерится. */}
-      <GameStatsBlock players={players} scores={scores} game={game}/>
-
       {/* Единый рейтинг 2-5 место. 1-е уже в большой winner-card сверху.
-          Старые блоки (podium-row 2-3 и results-full-table) убраны — теперь
-          один последовательный список с per-place ачивкой, очками и аватарами. */}
+          row.detail внутри каждой карточки уже содержит реальную статистику
+          игрока — отдельный блок «Факты партии» убран как дублирующий. */}
       <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
 
       {/* Share block — компактнее, в стилистике карточки */}
