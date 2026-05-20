@@ -740,7 +740,49 @@ async function handleUpdate(update, env) {
 
 /* ─── GameRoom Durable Object ────────────────────────────────────────────── */
 export class GameRoom {
-  constructor(state, env) { this.state = state; this.env = env; }
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    // In-memory кэш обогащённых players: { key, expiresAt, data }.
+    // Инвалидируется автоматически по TTL и явно при /join, /action, /leave
+    // (вызовом invalidateEnrich()). Сильно режет D1-нагрузку при poll'инге.
+    this._enrichCache = null;
+  }
+  invalidateEnrich() { this._enrichCache = null; }
+
+  // Запланировать "будильник" на 30 мин — если за это время не было
+  // активности, alarm() пометит комнату ended (см. метод alarm() ниже).
+  // Вызывается после каждой мутации; ставить можно много раз — Cloudflare
+  // просто переписывает таймер.
+  async scheduleCleanup() {
+    try {
+      const when = now() + 30 * 60 * 1000; // 30 минут
+      await this.state.storage.setAlarm(when);
+    } catch {}
+  }
+
+  // Cloudflare сам зовёт этот метод когда наступит время alarm'а.
+  async alarm() {
+    try {
+      const room = await this.state.storage.get('room');
+      if (!room) return;
+      const idleMs = now() - Number(room.updatedAt || room.createdAt || 0);
+      // Если не было активности 30 мин — закрываем; иначе откладываем будильник.
+      if (idleMs >= 30 * 60 * 1000) {
+        room.state = 'ended';
+        room.players = [];
+        room.version = (room.version || 0) + 1;
+        room.updatedAt = now();
+        await this.state.storage.put('room', room);
+        await this.mirrorRoom(room);
+        this.invalidateEnrich(); await this.scheduleCleanup();
+      } else {
+        // Кто-то ещё активен — откладываем будильник.
+        const remaining = 30 * 60 * 1000 - idleMs;
+        await this.state.storage.setAlarm(now() + remaining + 1000);
+      }
+    } catch (e) { console.error('alarm', e); }
+  }
 
   async mirrorRoom(room) {
     if (!this.env.DB) return;
@@ -778,6 +820,13 @@ export class GameRoom {
   async enrichPlayers(roomId, hostId, players) {
     if (!this.env.DB || !players?.length) {
       return players.map(p => ({ ...p, isHost: p.id === hostId }));
+    }
+    // Кэш на 2.5 сек: ключ = (roomId, hostId, #players, отсортированный список ID).
+    // При /join /action /leave явно вызываем invalidateEnrich() — кэш чистится.
+    const ts = now();
+    const key = `${roomId}|${hostId}|${players.length}|${players.map(p => p.id).sort().join(',')}`;
+    if (this._enrichCache && this._enrichCache.key === key && this._enrichCache.expiresAt > ts) {
+      return this._enrichCache.data;
     }
     let out = players.map(p => ({ ...p, isHost: p.id === hostId }));
     try {
@@ -818,6 +867,7 @@ export class GameRoom {
         });
       }
     } catch {}
+    this._enrichCache = { key, expiresAt: ts + 2500, data: out };
     return out;
   }
 
@@ -850,28 +900,75 @@ export class GameRoom {
     const method = request.method;
     if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
 
+    // Heartbeat: каждый запрос с X-Player-Id обновляет lastSeen этого игрока.
+    // Sweep dead-клиентов делается лениво в /state (там же возвращаем версию).
+    const pid = request.headers.get('x-player-id') || null;
+    const ts = now();
+
     if (method === 'GET' && url.pathname === '/state') {
       const room = await this.state.storage.get('room');
       if (!room) return corsJson({ error: 'room_not_found' }, 404);
-      // Обогащение игроков (см. enrichPlayers). 304-кэш убран т.к. user-данные
-      // могут меняться вне room.version (юзер логинится в TG ПОСЛЕ join).
+      // Heartbeat + sweep мёртвых клиентов (30с TTL). Делаем перед ETag,
+      // чтобы клиенты получили актуальный список после удаления.
+      const PLAYER_TTL_MS = 30000;
+      let mutated = false;
+      if (!room.lastSeen) room.lastSeen = {};
+      if (pid) { room.lastSeen[pid] = ts; mutated = true; }
+      const before = (room.players || []).length;
+      if (before > 0) {
+        const survivors = room.players.filter(p => {
+          const seen = Number(room.lastSeen[p.id] || room.createdAt || 0);
+          return (ts - seen) < PLAYER_TTL_MS;
+        });
+        if (survivors.length !== before) {
+          // Если все мёртвые — комнату закрываем целиком.
+          if (survivors.length === 0) {
+            room.players = [];
+            room.state = 'ended';
+          } else {
+            // Хост вылетел → передаём хоста выжившему.
+            if (!survivors.find(s => s.id === room.hostId)) {
+              room.hostId = survivors[0].id;
+            }
+            room.players = survivors;
+          }
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        room.version = (room.version || 0) + 1;
+        room.updatedAt = ts;
+        await this.state.storage.put('room', room);
+        this.invalidateEnrich(); await this.scheduleCleanup();
+      }
+
+      const enrichBucket = Math.floor(now() / 10000); // bumps every 10s
+      const tag = `"v${room.version || 0}-p${(room.players||[]).length}-e${enrichBucket}"`;
+      const inm = request.headers.get('if-none-match');
+      if (inm && inm === tag) {
+        return new Response(null, { status: 304, headers: {
+          ...CORS_HEADERS, ETag: tag, 'Cache-Control': 'no-store',
+        }});
+      }
       const players = await this.enrichPlayers(room.id, room.hostId, room.players || []);
       const out = { ...room, players };
       return new Response(JSON.stringify(out), {
         status: 200,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json', ETag: tag, 'Cache-Control': 'no-store' },
       });
     }
 
     if (method === 'POST' && url.pathname === '/init') {
       const body = await request.json();
-      const ts = now();
+      const lastSeen = {};
+      for (const p of (body.players || [])) lastSeen[p.id] = ts;
       const room = {
         id: body.id,
         hostId: body.hostId,
         gameId: body.gameId,
         settings: body.settings || { rounds: 6, vibe: 'warmup' },
         players: body.players || [],
+        lastSeen,
         state: 'lobby',
         roundIndex: 0,
         version: 1,
@@ -879,6 +976,7 @@ export class GameRoom {
         updatedAt: ts,
       };
       await this.state.storage.put('room', room);
+      this.invalidateEnrich(); await this.scheduleCleanup();
       await this.mirrorRoom(room);
       for (const p of room.players) await this.mirrorPlayer(room.id, { ...p, anonId: p.anonId || null, isHost: p.id === room.hostId, ready: true });
       const players = await this.enrichPlayers(room.id, room.hostId, room.players || []);
@@ -901,9 +999,12 @@ export class GameRoom {
         username: body.username || null,
       };
       if (!room.players.some(p => p.id === player.id)) room.players.push(player);
+      if (!room.lastSeen) room.lastSeen = {};
+      room.lastSeen[player.id] = ts;
       room.version = (room.version || 0) + 1;
-      room.updatedAt = now();
+      room.updatedAt = ts;
       await this.state.storage.put('room', room);
+      this.invalidateEnrich(); await this.scheduleCleanup();
       await this.mirrorRoom(room);
       await this.mirrorPlayer(room.id, { ...player, isHost: false, ready: true });
       // Возвращаем обогащённый ответ — гость сразу видит аватарки/имена хоста и остальных.
@@ -915,6 +1016,8 @@ export class GameRoom {
       const body = await request.json();
       const room = await this.state.storage.get('room');
       if (!room) return corsJson({ error: 'room_not_found' }, 404);
+      if (!room.lastSeen) room.lastSeen = {};
+      if (pid) room.lastSeen[pid] = ts; // heartbeat от активного клиента
       if (body.state !== undefined) room.state = body.state;
       if (body.gameId !== undefined) {
         // Хост сменил игру в лобби. Сбрасываем round-state и индекс — это
@@ -926,8 +1029,16 @@ export class GameRoom {
       }
       if (body.roundIndex !== undefined) {
         // Сменился индекс раунда — сбрасываем round-state.
-        room.roundIndex = body.roundIndex;
-        room.round = null;
+        // Монотонная защита: принимаем ТОЛЬКО строго большее значение
+        // (или 0 — это явный сброс при старте новой партии). Это предотвращает
+        // off-by-one при гонке двух клиентов на nextRound и круги "назад в
+        // предыдущий вопрос" при reload-флапах.
+        const next = Number(body.roundIndex);
+        const cur = Number(room.roundIndex || 0);
+        if (Number.isFinite(next) && (next === 0 || next > cur)) {
+          room.roundIndex = next;
+          room.round = null;
+        }
       }
       // Per-round state (выбор «Правда/Действие», открытая карточка и т.д.)
       // Используется для синхронизации действий хода между игроками.
@@ -954,6 +1065,7 @@ export class GameRoom {
       room.version = (room.version || 0) + 1;
       room.updatedAt = now();
       await this.state.storage.put('room', room);
+      this.invalidateEnrich(); await this.scheduleCleanup();
       await this.mirrorRoom(room);
       return corsJson(room);
     }
@@ -982,6 +1094,7 @@ export class GameRoom {
       room.version = (room.version || 0) + 1;
       room.updatedAt = now();
       await this.state.storage.put('room', room);
+      this.invalidateEnrich(); await this.scheduleCleanup();
       await this.mirrorRoom(room);
       return corsJson({ ok: true, removed, closed, hostId: newHostId });
     }

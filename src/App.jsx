@@ -1241,6 +1241,7 @@ export default function App() {
             isMultiplayer={isMultiplayer}
             isHost={isHost}
             roomId={roomId}
+            myId={myPlayerId}
             onHostNavigated={(serverState) => {
               if (serverState === 'lobby') { setRoundIndex(0); setScores({}); setRoomRoundState(null); navigate(SCREENS.LOBBY) }
               else if (serverState === 'playing') { setRoundIndex(0); setRoomRoundState(null); navigate(SCREENS.ROUND) }
@@ -3108,13 +3109,17 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
     if (!isMultiplayer || !roomId) return
     let cancelled = false
     let timer = null
+    let lastEtag = null
     const poll = async () => {
       if (cancelled) return
       if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
       try {
-        const res = await fetch(`/api/room/${roomId}`)
+        const headers = { ...(lastEtag ? { 'If-None-Match': lastEtag } : {}), ...(myId ? { 'X-Player-Id': String(myId) } : {}) }
+        const res = await fetch(`/api/room/${roomId}`, { headers })
         if (cancelled) return
+        if (res.status === 304) { schedule(); return }
         if (!res.ok) { schedule(); return }
+        const et = res.headers.get('etag'); if (et) lastEtag = et
         const serverRoom = await res.json()
         if (serverRoom.players && onRoomPlayersUpdate) onRoomPlayersUpdate(serverRoom)
         const prevState = lastServerStateRef.current
@@ -3167,15 +3172,22 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
     onStart()
   }
 
-  // Хост: при изменении rounds/vibe пушим в DO, гости подтянут через poll.
+  // Хост: при изменении rounds/vibe пушим в DO. Debounce 500мс +
+  // объединение rounds/vibe в один POST — на драг слайдера / быструю
+  // перекрутку чипов вместо 5-10 запросов уходит ровно один.
+  const settingsPushTimerRef = useRef(null)
   useEffect(() => {
     if (!isMultiplayer || !isHost || !roomId) return
-    const payload = { settings: { rounds: settings?.rounds, vibe: currentVibe } }
-    fetch(`/api/room/${roomId}/action`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {})
+    if (settingsPushTimerRef.current) clearTimeout(settingsPushTimerRef.current)
+    settingsPushTimerRef.current = setTimeout(() => {
+      const payload = { settings: { rounds: settings?.rounds, vibe: currentVibe } }
+      fetch(`/api/room/${roomId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {})
+    }, 500)
+    return () => { if (settingsPushTimerRef.current) clearTimeout(settingsPushTimerRef.current) }
   }, [isMultiplayer, isHost, roomId, settings?.rounds, currentVibe])
 
   // Выход из лобби: уведомляем DO, потом колбэк уведёт на главную "Играть".
@@ -3482,7 +3494,7 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
       if (cancelled) return
       if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
       try {
-        const headers = lastEtag ? { 'If-None-Match': lastEtag } : undefined
+        const headers = { ...(lastEtag ? { 'If-None-Match': lastEtag } : {}), ...(myId ? { 'X-Player-Id': String(myId) } : {}) }
         const res = await fetch(`/api/room/${roomId}`, { headers })
         if (cancelled) return
         if (res.status === 304) { schedule(); return }
@@ -3494,10 +3506,14 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
         if (serverRoom.roundIndex < roundIndex) { schedule(); return }
         // Хост принудительно вернул всех в лобби (кнопка "Завершить игру").
         if (serverRoom.state === 'lobby' && onForceLobby) { onForceLobby(); return }
-        // Универсальная сигнатура для детекции изменений round-state:
-        // включает choice, pickedAt И полное содержимое votes (для NeverHaveI).
-        const sig = serverRoom.round ? JSON.stringify(serverRoom.round) : 'null'
-        if (sig !== lastSig) { lastSig = sig; onRoundStateSync?.(serverRoom.round || null) }
+        // Селективная сигнатура (дешевле, чем JSON.stringify) — учитывает
+        // только релевантные поля. Для голосовалок берём количество ответов
+        // (нам важно что кто-то добавился, а не точная разница).
+        const r = serverRoom.round
+        const sig = r
+          ? `${r.choice||''}|${r.pickedAt||0}|${r.phase||''}|${r.startedAt||0}|${r.wordIdx||0}|${(r.score?.correct||0)+(r.score?.skipped||0)}|${Object.keys(r.votes||{}).length}|${Object.keys(r.answers||{}).length}`
+          : 'null'
+        if (sig !== lastSig) { lastSig = sig; onRoundStateSync?.(r || null) }
       } catch {}
       schedule()
     }
@@ -3643,22 +3659,24 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
   }
 
   // ── Завершение хода (следующий раунд) ──
+  // Оптимизация: один POST вместо двух (раньше handleNext посылал
+  // {playerTime, round:null} + позже nextRound посылал {roundIndex}). Теперь
+  // вкладываем roundIndex прямо сюда → DO сам сбросит round при смене idx.
   const handleNext = async () => {
     if (!isMyTurn || busy) return
     const ms = Math.max(0, Date.now() - (turnStartRef.current || Date.now()))
     if (isMultiplayer && roomId && activePlayer?.id) {
       setBusy(true)
-      // Локально мгновенно сбрасываем round-state — больше не показываем карточку.
       onRoundStateSync?.(null)
       try {
-        // Одним запросом: фиксируем время хода + чистим round.
+        const nextIdx = roundIndex + 1
+        const isLast = nextIdx >= total
         await api.roomAction(roomId, {
           playerTime: { playerId: activePlayer.id, ms },
-          round: null,
+          ...(isLast ? {} : { roundIndex: nextIdx }),
         })
       } catch {}
-      // onNext (App.nextRound) сам отправит roundIndex на сервер — теперь это
-      // делает ЛЮБОЙ клиент (не только хост), что чинит синк, когда активный — не хост.
+      // App.nextRound выставит локальный setRoundIndex и навигирует на RESULTS если последний.
       onNext()
       setBusy(false)
       return
@@ -4399,10 +4417,27 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
   const [localStartedAt, setLocalStartedAt] = useState(0)
   const [localWordIdx, setLocalWordIdx] = useState(0)
   const [localScore, setLocalScore] = useState({ correct: 0, skipped: 0 })
+  // Локальный буфер прироста для batch'инга (только в MP). На каждое
+  // нажатие "Угадали/Пропустить" обновляем буфер мгновенно — отображение
+  // плавное; в DO отсылаем agg раз в N (debounce) ИЛИ принудительно в
+  // done/handleNext. До этого момента счёт у остальных может отставать
+  // на ~500 мс — это ОК для "Элиаса", где счётчик не критичен.
+  const [localBufScore, setLocalBufScore] = useState({ correct: 0, skipped: 0 })
+  const [localBufWordIdx, setLocalBufWordIdx] = useState(0)
+  const aliasFlushTimer = useRef(null)
   const phase = isMultiplayer ? mpPhase : localPhase
   const startedAt = isMultiplayer ? mpStartedAt : localStartedAt
-  const wordIdx = isMultiplayer ? mpWordIdx : localWordIdx
-  const score = isMultiplayer ? mpScore : localScore
+  // wordIdx + score берём из локального буфера у объясняющего (мгновенный отклик),
+  // у остальных — из mpScore/mpWordIdx (что приехало с сервера).
+  const wordIdx = isMultiplayer
+    ? (isExplainer ? Math.max(mpWordIdx, localBufWordIdx) : mpWordIdx)
+    : localWordIdx
+  const score = isMultiplayer
+    ? (isExplainer
+        ? { correct: Math.max(mpScore.correct, localBufScore.correct),
+            skipped: Math.max(mpScore.skipped, localBufScore.skipped) }
+        : mpScore)
+    : localScore
 
   const ROUND_SEC = 60
   const [now, setNow] = useState(() => Date.now())
@@ -4423,15 +4458,38 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
       body: JSON.stringify({ round: next }) }) } catch {}
   }
 
-  // Авто-переход playing → done
+  // Сбросить буфер на сервер (вызывается debounce'нуто и принудительно).
+  const flushAliasBuf = async () => {
+    if (!isMultiplayer || !isExplainer || !roomId) return
+    if (localBufScore.correct === 0 && localBufScore.skipped === 0 && localBufWordIdx === 0) return
+    const merged = {
+      correct: Math.max(mpScore.correct, localBufScore.correct),
+      skipped: Math.max(mpScore.skipped, localBufScore.skipped),
+    }
+    const ni = Math.max(mpWordIdx, localBufWordIdx)
+    setLocalBufScore({ correct: 0, skipped: 0 }); setLocalBufWordIdx(0)
+    await syncState({ score: merged, wordIdx: ni })
+  }
+
+  // Авто-переход playing → done. При переходе обязательно flush'им буфер.
   useEffect(() => {
     if (phase !== 'playing' || !startedAt) return
     if (elapsed >= ROUND_SEC) {
-      if (isMultiplayer && isExplainer) syncState({ phase: 'done' })
-      else if (!isMultiplayer) setLocalPhase('done')
+      if (isMultiplayer && isExplainer) {
+        // Финальный flush — гарантия что результат раунда не теряется.
+        if (aliasFlushTimer.current) { clearTimeout(aliasFlushTimer.current); aliasFlushTimer.current = null }
+        flushAliasBuf().then(() => syncState({ phase: 'done' }))
+      } else if (!isMultiplayer) setLocalPhase('done')
       haptic?.('success')
     }
   }, [elapsed, phase, startedAt, isMultiplayer, isExplainer]) // eslint-disable-line
+
+  // Cleanup при размонтировании — гарантия flush'а если игрок свернул.
+  useEffect(() => {
+    return () => {
+      if (aliasFlushTimer.current) { clearTimeout(aliasFlushTimer.current); flushAliasBuf().catch(() => {}) }
+    }
+  }, []) // eslint-disable-line
 
   const startGame = async () => {
     const ts = Date.now()
@@ -4441,18 +4499,34 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
       setLocalPhase('playing'); setLocalStartedAt(ts); setLocalWordIdx(0); setLocalScore({ correct: 0, skipped: 0 })
     }
   }
-  const correct = async () => {
-    haptic('impact')
-    const ns = { correct: score.correct + 1, skipped: score.skipped }
-    const ni = Math.min(wordIdx + 1, Math.max(0, words.length - 1))
-    if (isMultiplayer && isExplainer) await syncState({ score: ns, wordIdx: ni })
-    else { setLocalScore(ns); setLocalWordIdx(ni) }
+  // Локально мгновенно обновляем буфер; debounce flush в DO раз в 1.2 с —
+  // вместо 5-10 POST'ов за 60-сек раунд получаем 1-2 batch'а + финальный.
+  const scheduleAliasFlush = () => {
+    if (aliasFlushTimer.current) clearTimeout(aliasFlushTimer.current)
+    aliasFlushTimer.current = setTimeout(() => { flushAliasBuf().catch(() => {}) }, 1200)
   }
-  const skip = async () => {
-    const ns = { correct: score.correct, skipped: score.skipped + 1 }
+  const correct = () => {
+    haptic('impact')
     const ni = Math.min(wordIdx + 1, Math.max(0, words.length - 1))
-    if (isMultiplayer && isExplainer) await syncState({ score: ns, wordIdx: ni })
-    else { setLocalScore(ns); setLocalWordIdx(ni) }
+    if (isMultiplayer && isExplainer) {
+      setLocalBufScore(b => ({ correct: (b.correct||0) + 1, skipped: b.skipped||0 }))
+      setLocalBufWordIdx(ni)
+      scheduleAliasFlush()
+    } else if (!isMultiplayer) {
+      setLocalScore(s => ({ correct: s.correct + 1, skipped: s.skipped }))
+      setLocalWordIdx(ni)
+    }
+  }
+  const skip = () => {
+    const ni = Math.min(wordIdx + 1, Math.max(0, words.length - 1))
+    if (isMultiplayer && isExplainer) {
+      setLocalBufScore(b => ({ correct: b.correct||0, skipped: (b.skipped||0) + 1 }))
+      setLocalBufWordIdx(ni)
+      scheduleAliasFlush()
+    } else if (!isMultiplayer) {
+      setLocalScore(s => ({ correct: s.correct, skipped: s.skipped + 1 }))
+      setLocalWordIdx(ni)
+    }
   }
 
   const handleNext = async () => {
@@ -5949,7 +6023,7 @@ function TitlesBoard({ players, game }) {
   )
 }
 
-function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated }) {
+function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated, myId }) {
   // Гости в мультиплеере поллят комнату медленно (3 c, с visibility-gate):
   // как только хост поменяет state на 'lobby' или 'playing' — навигатор
   // сам отправит гостей туда же, чтобы все были в одном месте.
@@ -5960,7 +6034,7 @@ function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, 
       if (cancelled) return
       if (typeof document !== 'undefined' && document.hidden) { schedule(); return }
       try {
-        const headers = lastEtag ? { 'If-None-Match': lastEtag } : undefined
+        const headers = { ...(lastEtag ? { 'If-None-Match': lastEtag } : {}), ...(myId ? { 'X-Player-Id': String(myId) } : {}) }
         const res = await fetch(`/api/room/${roomId}`, { headers })
         if (cancelled) return
         if (res.status === 304) { schedule(); return }
