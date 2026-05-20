@@ -812,6 +812,10 @@ export default function App() {
     try { localStorage.removeItem('pu_whoofus_stats') } catch {}
     try { localStorage.removeItem('pu_five_stats') } catch {}
     try { localStorage.removeItem('pu_assoc_stats') } catch {}
+    try { localStorage.removeItem('pu_alias_stats') } catch {}
+    try { localStorage.removeItem('pu_croco_stats') } catch {}
+    try { localStorage.removeItem('pu_whoami_stats') } catch {}
+    try { localStorage.removeItem('pu_wr_stats') } catch {}
 
     // Универсальная функция: тасуем пул и берём первые N карточек.
     const buildDeck = () => {
@@ -1222,7 +1226,17 @@ export default function App() {
               // Dedupe по полной JSON-сигнатуре (учитывает votes для NeverHaveI).
               const a = prev ? JSON.stringify(prev) : 'null'
               const b = rs ? JSON.stringify(rs) : 'null'
-              return a === b ? prev : rs
+              if (a === b) return prev
+              // Защита от мерцания: если polling вернул null, а у нас локально
+              // есть state — это типичная гонка «optimistic update vs polling»
+              // (нажали Правда → optimistic local set → polling успел сходить
+              // на сервер ДО того, как там сохранился наш round → возвращает
+              // null → мы стираем optimistic → кнопки выбора моргают).
+              // НИКТО уже не отправляет round=null отдельным запросом (DO сам
+              // сбрасывает round при смене roundIndex, а это идёт другим path —
+              // onRoundSync). Поэтому такой null от polling всегда устаревший.
+              if (rs == null && prev != null) return prev
+              return rs
             })}
             roomRoundState={roomRoundState}
             onGameEnded={() => { navigate(SCREENS.RESULTS) }}
@@ -1358,29 +1372,42 @@ export default function App() {
           />}
       </main>
 
-      {/* BottomNav статичный — виден на всех экранах */}
-      <BottomNav
-        screen={screen}
-        onNavigate={(s) => { haptic(); navigateTab(s) }}
-        currentVibe={picker.vibe}
-        onOpenVibePicker={() => { haptic(); setShowVibePicker(true) }}
-      />
-
-      {showVibePicker && (
-        <VibePickerModal
-          currentVibe={picker.vibe}
-          ownedPacks={ownedPacks}
-          onBuy={(v) => { setBuyVibe(v); setShowVibePicker(false) }}
-          onPick={(v) => {
-            setPicker(p => ({ ...p, vibe: v }))
-            ev.vibeChange(v)
-            setShowVibePicker(false)
-            haptic('success')
-            burstFromVibeBtn()
-          }}
-          onClose={() => setShowVibePicker(false)}
-        />
-      )}
+      {/* BottomNav статичный — виден на всех экранах.
+          ВАЖНО: пока идёт партия (mp playing или single-player в ROUND/RESULTS)
+          смена вайба ЗАПРЕЩЕНА: deck зафиксирован под исходный вайб, и любая
+          смена приведёт к рассинхрону карточек между игроками (mp) или просто
+          игнорируется в текущей партии (single). */}
+      {(() => {
+        const vibeLocked = (isMultiplayer && room?.state === 'playing')
+          || (!isMultiplayer && (screen === SCREENS.ROUND || screen === SCREENS.RESULTS))
+        return <>
+          <BottomNav
+            screen={screen}
+            onNavigate={(s) => { haptic(); navigateTab(s) }}
+            currentVibe={picker.vibe}
+            vibeLocked={vibeLocked}
+            onOpenVibePicker={() => {
+              if (vibeLocked) { haptic('warning'); return }
+              haptic(); setShowVibePicker(true)
+            }}
+          />
+          {showVibePicker && !vibeLocked && (
+            <VibePickerModal
+              currentVibe={picker.vibe}
+              ownedPacks={ownedPacks}
+              onBuy={(v) => { setBuyVibe(v); setShowVibePicker(false) }}
+              onPick={(v) => {
+                setPicker(p => ({ ...p, vibe: v }))
+                ev.vibeChange(v)
+                setShowVibePicker(false)
+                haptic('success')
+                burstFromVibeBtn()
+              }}
+              onClose={() => setShowVibePicker(false)}
+            />
+          )}
+        </>
+      })()}
 
       {showPremium && (
         <PremiumModal
@@ -1697,7 +1724,7 @@ const NAV_ITEMS = [
   { id: SCREENS.SETTINGS,     label: 'Настройки', Icon: Settings },
 ]
 
-function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
+function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker, vibeLocked = false }) {
   const vibe = VIBES.find(v => v.id === currentVibe) || VIBES[0]
   // «Играть» подсвечена активной, когда мы в любом экране Play-группы
   // (детали игры, лобби, раунд, результаты и т.д.).
@@ -1709,17 +1736,25 @@ function BottomNav({ screen, onNavigate, currentVibe, onOpenVibePicker }) {
           // Центральный слот — только иконка вайба (название не помещалось
           // для «Близкие друзья» и др.). Цветная индикация = текущий вайб,
           // кружок-индикатор внизу, под иконкой подпись «Вайб» как у других
-          // слотов (короткая, всегда одна и та же).
+          // слотов (короткая, всегда одна и та же). Когда vibeLocked — кнопка
+          // визуально приглушена + иконка lock, открытие picker'а блокируется
+          // в onClick parent'а.
           return (
             <button
               key="vibe"
               type="button"
-              className="bnav-item is-vibe"
+              className={`bnav-item is-vibe ${vibeLocked ? 'is-vibe-locked' : ''}`}
               data-vibe={vibe.id}
               onClick={onOpenVibePicker}
-              aria-label={`Сменить вайб (сейчас: ${vibe.label})`}
+              aria-label={vibeLocked
+                ? `Вайб зафиксирован на партию: ${vibe.label}`
+                : `Сменить вайб (сейчас: ${vibe.label})`}
+              title={vibeLocked ? 'Вайб зафиксирован на партию' : undefined}
             >
-              <span className="bnav-vibe-icon"><VibeIcon vibeId={vibe.id} size={22}/></span>
+              <span className="bnav-vibe-icon">
+                <VibeIcon vibeId={vibe.id} size={22}/>
+                {vibeLocked && <span className="bnav-vibe-lock"><Lock size={9}/></span>}
+              </span>
               <span className="bnav-vibe-label">{vibe.label}</span>
             </button>
           )
@@ -4612,6 +4647,20 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     if (advancingRef.current) return
     advancingRef.current = true
     if (score.correct > 0) recordRoundScore?.({ [activePlayer.id]: score.correct })
+    // ── Per-player статистика партии (для финиш-экрана) ───────────────────
+    // pu_alias_stats: { [pid]: { name, turns, totalCorrect, totalSkipped, bestRound } }
+    try {
+      const k = 'pu_alias_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, turns: 0, totalCorrect: 0, totalSkipped: 0, bestRound: 0 }
+      s.name = activePlayer.name
+      s.turns += 1
+      s.totalCorrect += Number(score.correct || 0)
+      s.totalSkipped += Number(score.skipped || 0)
+      if (Number(score.correct || 0) > s.bestRound) s.bestRound = Number(score.correct)
+      all[activePlayer.id] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
     if (isMultiplayer && roomId) {
       // DO сам обнулит round при смене roundIndex; не дёргаем roomRoundState(null)
       // здесь, чтобы не было мерцания «pre-start» экрана на следующий 1 кадр.
@@ -4784,6 +4833,21 @@ function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore
     setQCount(c => c + 1)
   }
 
+  // pu_whoami_stats: { [pid]: { name, attempts, wins, totalPts, bestPts } }
+  const bumpWhoAmIStat = (pts) => {
+    try {
+      const k = 'pu_whoami_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, attempts: 0, wins: 0, totalPts: 0, bestPts: 0 }
+      s.name = activePlayer.name
+      s.attempts += 1
+      s.wins += 1
+      s.totalPts += Number(pts || 0)
+      if (Number(pts || 0) > s.bestPts) s.bestPts = Number(pts)
+      all[activePlayer.id] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
+  }
   const submitGuess = () => {
     const guess = guessInput.trim().toLowerCase()
     const target = character.toLowerCase()
@@ -4795,6 +4859,7 @@ function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore
       const pts = Math.max(1, 10 - Math.floor(qCount / 2))
       setEarnedPts(pts)
       recordRoundScore?.({ [activePlayer.id]: pts })
+      bumpWhoAmIStat(pts)
       setPhase('guessed')
     } else {
       haptic('error')
@@ -4806,7 +4871,7 @@ function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore
   const handleGuessedManual = () => {
     haptic('success')
     recordRoundScore?.({ [activePlayer.id]: 1 })
-    setEarnedPts(1)
+    bumpWhoAmIStat(1)
     setPhase('guessed')
   }
 
@@ -5228,6 +5293,25 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
   const vote = async (choice) => {
     if (picked || voting) return
     setPicked(choice); setVoting(true); haptic('impact')
+    // pu_wr_stats: { [pid]: { name, picksA, picksB, majority, total } }
+    // majority = сколько раз игрок выбирал «как большинство»; для финиш-экрана
+    // даёт ачивку «Думает как все» / «Идёт против течения».
+    try {
+      const k = 'pu_wr_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, picksA: 0, picksB: 0, majority: 0, total: 0 }
+      s.name = activePlayer.name
+      s.total += 1
+      if (choice === 'A') s.picksA += 1; else s.picksB += 1
+      const baseA0 = Number(round.promptData?.wr_a || 0)
+      const baseB0 = Number(round.promptData?.wr_b || 0)
+      if (baseA0 + baseB0 > 0) {
+        const majSide = baseA0 >= baseB0 ? 'A' : 'B'
+        if (majSide === choice) s.majority += 1
+      }
+      all[activePlayer.id] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
     // Базовые цифры из карточки (если уже есть голоса) + наш голос локально
     const baseA = Number(round.promptData?.wr_a || 0)
     const baseB = Number(round.promptData?.wr_b || 0)
@@ -5430,17 +5514,34 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
   // не сможет нажать "Угадали/Не угадали".
   const advancingRef = useRef(false)
   useEffect(() => { advancingRef.current = false }, [roundIndex])
+  // pu_croco_stats: { [pid]: { name, shown, guessed, missed } }
+  // shown = сколько раз игрок показывал; guessed = из них угадано группой; missed = промахи.
+  const bumpCrocoStat = (key) => {
+    try {
+      const k = 'pu_croco_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, shown: 0, guessed: 0, missed: 0 }
+      s.name = activePlayer.name
+      s.shown += 1
+      if (key === 'guessed') s.guessed += 1
+      else if (key === 'missed') s.missed += 1
+      all[activePlayer.id] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
+  }
   const handleGuessed = async () => {
     if (advancingRef.current) return
     advancingRef.current = true
     haptic('success')
     recordRoundScore?.({ [activePlayer.id]: 2 })
+    bumpCrocoStat('guessed')
     await reset(); onNext()
   }
   const handleMissed = async () => {
     if (advancingRef.current) return
     advancingRef.current = true
     haptic('impact')
+    bumpCrocoStat('missed')
     await reset(); onNext()
   }
 
@@ -6284,37 +6385,189 @@ const DEFAULT_PLACE_TITLES = [
   { medal: '✨', title: 'В пятёрке',    sub: 'Часть компании' },
 ]
 
+// Безопасное чтение per-game stats из localStorage.
+function loadGameStats(key) {
+  try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
+}
+
 // Возвращает { value, unit } для каждой игры на основе нужного источника очков.
 function computeGameRanking(players, scores, game) {
   const id = game?.id
-  // Загружаем per-game stats для тех игр, где балл — не из scores.
-  const loadStats = (key) => {
-    try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
-  }
   let rows = []
   let unit = 'оч.'
   if (id === 'whoofus') {
-    const s = loadStats('pu_whoofus_stats')
+    const s = loadGameStats('pu_whoofus_stats')
     rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
     unit = (n) => `${n} голос${n === 1 ? '' : n < 5 ? 'а' : 'ов'}`
   } else if (id === 'never') {
-    const s = loadStats('pu_never_stats')
+    const s = loadGameStats('pu_never_stats')
     rows = players.map(p => ({ ...p, value: Number(s[p.id]?.yes || 0) }))
     unit = (n) => `${n} призн.`
   } else if (id === 'five') {
-    const s = loadStats('pu_five_stats')
+    const s = loadGameStats('pu_five_stats')
     rows = players.map(p => ({ ...p, value: Number(s[p.id]?.success || 0), tieBreak: -Number(s[p.id]?.fail || 0) }))
     unit = (n) => `${n} удач`
   } else if (id === 'associations') {
-    const s = loadStats('pu_assoc_stats')
+    const s = loadGameStats('pu_assoc_stats')
     rows = players.map(p => ({ ...p, value: Number(s[p.id] || 0) }))
     unit = (n) => `${n} совп.`
+  } else if (id === 'alias') {
+    const s = loadGameStats('pu_alias_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.totalCorrect || scores?.[p.id] || 0), tieBreak: -Number(s[p.id]?.totalSkipped || 0) }))
+    unit = (n) => `${n} объясн.`
+  } else if (id === 'crocodile') {
+    const s = loadGameStats('pu_croco_stats')
+    rows = players.map(p => ({
+      ...p,
+      // Очки за показ — 2 за каждое угаданное; +1 за участие как зритель не считаем
+      // (нет данных). Сортировка по reactiveScores как fallback (recordRoundScore).
+      value: Number(scores?.[p.id] || (Number(s[p.id]?.guessed || 0) * 2)),
+      tieBreak: -Number(s[p.id]?.missed || 0),
+    }))
+    unit = (n) => `${n} оч.`
+  } else if (id === 'whoami') {
+    const s = loadGameStats('pu_whoami_stats')
+    rows = players.map(p => ({
+      ...p,
+      value: Number(scores?.[p.id] || s[p.id]?.totalPts || 0),
+      tieBreak: Number(s[p.id]?.wins || 0),
+    }))
+    unit = (n) => `${n} оч.`
+  } else if (id === 'would_rather') {
+    const s = loadGameStats('pu_wr_stats')
+    rows = players.map(p => ({ ...p, value: Number(s[p.id]?.majority || 0), tieBreak: Number(s[p.id]?.total || 0) }))
+    unit = (n) => `${n} с большинств.`
+  } else if (id === 'truth') {
+    // По активному времени на хоту (чем дольше игрок «держался под прицелом» —
+    // тем смелее). activeMs приходит из room.players (recordActiveMs).
+    rows = players.map(p => ({ ...p, value: Math.round(Number(p.activeMs || 0) / 1000), tieBreak: Number(scores?.[p.id] || 0) }))
+    unit = (n) => `${n} сек.`
   } else {
     rows = players.map(p => ({ ...p, value: Number(scores?.[p.id] || 0) }))
     unit = (n) => `${n} оч.`
   }
   rows.sort((a, b) => (b.value - a.value) || ((b.tieBreak||0) - (a.tieBreak||0)))
   return { rows, unit }
+}
+
+// Презентационные «факты партии» для каждой игры — массив чипов с метрикой
+// и подписью. Возвращает [] если данных недостаточно (например, никто не играл).
+// Эти чипы рендерятся в `GameStatsBlock` под winner-card.
+function gameFunFacts(players, scores, game) {
+  const id = game?.id
+  const byId = (pid) => players.find(p => String(p.id) === String(pid))?.name || '—'
+  const out = []
+  if (id === 'alias') {
+    const s = loadGameStats('pu_alias_stats')
+    let totalCorrect = 0, totalSkipped = 0
+    let bestRound = { v: 0, pid: null }
+    for (const [pid, r] of Object.entries(s)) {
+      totalCorrect += Number(r.totalCorrect || 0)
+      totalSkipped += Number(r.totalSkipped || 0)
+      if (Number(r.bestRound || 0) > bestRound.v) bestRound = { v: Number(r.bestRound), pid }
+    }
+    if (totalCorrect > 0) out.push({ icon: '🎯', value: totalCorrect, label: 'слов объяснено за партию' })
+    if (bestRound.v > 0) out.push({ icon: '🚀', value: bestRound.v, label: `лучший раунд — ${byId(bestRound.pid)}` })
+    if (totalSkipped > 0) out.push({ icon: '⏭️', value: totalSkipped, label: 'пропущено' })
+  } else if (id === 'crocodile') {
+    const s = loadGameStats('pu_croco_stats')
+    let guessed = 0, missed = 0, best = { v: 0, pid: null }
+    for (const [pid, r] of Object.entries(s)) {
+      guessed += Number(r.guessed || 0)
+      missed += Number(r.missed || 0)
+      if (Number(r.guessed || 0) > best.v) best = { v: Number(r.guessed), pid }
+    }
+    if (guessed > 0) out.push({ icon: '🎭', value: guessed, label: 'угадано слов' })
+    if (missed > 0) out.push({ icon: '🤐', value: missed, label: 'не угадано' })
+    if (best.v > 0) out.push({ icon: '🏆', value: best.v, label: `мастер вечера — ${byId(best.pid)}` })
+  } else if (id === 'whoami') {
+    const s = loadGameStats('pu_whoami_stats')
+    let wins = 0, total = 0, best = { v: 0, pid: null }
+    for (const [pid, r] of Object.entries(s)) {
+      wins += Number(r.wins || 0)
+      total += Number(r.totalPts || 0)
+      if (Number(r.bestPts || 0) > best.v) best = { v: Number(r.bestPts), pid }
+    }
+    if (wins > 0) out.push({ icon: '🎯', value: wins, label: 'персонажей угадано' })
+    if (total > 0) out.push({ icon: '⭐', value: total, label: 'всего очков' })
+    if (best.v > 0) out.push({ icon: '🧠', value: `+${best.v}`, label: `самая быстрая отгадка — ${byId(best.pid)}` })
+  } else if (id === 'would_rather') {
+    const s = loadGameStats('pu_wr_stats')
+    let totalVotes = 0, withMaj = 0, maxAB = { a: 0, b: 0 }
+    for (const r of Object.values(s)) {
+      totalVotes += Number(r.total || 0)
+      withMaj += Number(r.majority || 0)
+      maxAB.a += Number(r.picksA || 0); maxAB.b += Number(r.picksB || 0)
+    }
+    if (totalVotes > 0) {
+      out.push({ icon: '🗳️', value: totalVotes, label: 'выборов сделано' })
+      const pct = Math.round((withMaj / totalVotes) * 100)
+      out.push({ icon: '🌊', value: `${pct}%`, label: 'попаданий в большинство' })
+      if (maxAB.a + maxAB.b > 0) out.push({ icon: '⚖️', value: `${maxAB.a}/${maxAB.b}`, label: 'выборы А / Б' })
+    }
+  } else if (id === 'never') {
+    const s = loadGameStats('pu_never_stats')
+    let yes = 0, no = 0
+    for (const r of Object.values(s)) { yes += Number(r.yes || 0); no += Number(r.no || 0) }
+    if (yes + no > 0) {
+      out.push({ icon: '🙋', value: yes, label: '«было» признаний' })
+      out.push({ icon: '🙅', value: no, label: '«не было»' })
+      const pct = Math.round((yes / (yes + no)) * 100)
+      out.push({ icon: '🔥', value: `${pct}%`, label: 'опыта всей компании' })
+    }
+  } else if (id === 'whoofus') {
+    const s = loadGameStats('pu_whoofus_stats')
+    let total = 0
+    for (const v of Object.values(s)) total += Number(v || 0)
+    if (total > 0) out.push({ icon: '🗳️', value: total, label: 'голосов отдано' })
+  } else if (id === 'five') {
+    const s = loadGameStats('pu_five_stats')
+    let suc = 0, fail = 0
+    for (const r of Object.values(s)) { suc += Number(r.success || 0); fail += Number(r.fail || 0) }
+    if (suc + fail > 0) {
+      out.push({ icon: '⚡', value: suc, label: 'успешных ответов' })
+      out.push({ icon: '🛑', value: fail, label: 'не уложились' })
+      const pct = Math.round((suc / (suc + fail)) * 100)
+      out.push({ icon: '🎯', value: `${pct}%`, label: 'точность компании' })
+    }
+  } else if (id === 'associations') {
+    const s = loadGameStats('pu_assoc_stats')
+    let total = 0
+    for (const v of Object.values(s)) total += Number(v || 0)
+    if (total > 0) out.push({ icon: '✨', value: total, label: 'совпадений в ассоциациях' })
+  } else if (id === 'truth') {
+    let totalSec = 0, longest = { v: 0, pid: null }
+    for (const p of players) {
+      const sec = Math.round(Number(p.activeMs || 0) / 1000)
+      totalSec += sec
+      if (sec > longest.v) longest = { v: sec, pid: p.id }
+    }
+    if (totalSec > 0) {
+      out.push({ icon: '⏱️', value: `${Math.round(totalSec / 60)} мин`, label: 'всего на пьедестале' })
+      if (longest.v > 0) out.push({ icon: '🔥', value: `${longest.v} с`, label: `держался дольше всех — ${byId(longest.pid)}` })
+    }
+  }
+  return out
+}
+
+// Универсальный блок «факты партии» — небольшие чипы, без перегруза.
+function GameStatsBlock({ players, scores, game }) {
+  const facts = useMemo(() => gameFunFacts(players, scores, game), [players, scores, game])
+  if (!facts.length) return null
+  return (
+    <div className="game-stats-block">
+      <div className="game-stats-title">📊 Факты партии</div>
+      <div className="game-stats-grid">
+        {facts.map((f, i) => (
+          <div key={i} className="game-stats-chip">
+            <span className="game-stats-chip-icon" aria-hidden="true">{f.icon}</span>
+            <span className="game-stats-chip-value">{f.value}</span>
+            <span className="game-stats-chip-label">{f.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function RatingList({ players, scores, game, winnerId }) {
@@ -6410,7 +6663,10 @@ const podiumMedals = ['🏆', '🥈', '🥉']
     whoofus:      { title: 'Звезда компании', sub: 'Большинство выбирало именно тебя' },
     five:         { title: 'Самый быстрый ум', sub: 'Без пауз и запинок' },
     associations: { title: 'Думает как все', sub: 'Идеальное чувство компании' },
-    would_rather: { title: 'Решительный', sub: 'Выбирает уверенно' },
+    would_rather: { title: 'На одной волне с компанией', sub: 'Чаще всех попадал в большинство' },
+    crocodile:    { title: 'Мастер пантомимы', sub: 'Слова угадывали с первого жеста' },
+    alias:        { title: 'Король объяснений', sub: 'Слова летели как из автомата' },
+    whoami:       { title: 'Острый ум вечера', sub: 'Угадывал быстрее всех' },
   }
   const tagline = GAME_WINNER_TAGLINE[game.id] || { title: 'Главный герой вечера', sub: game.title }
   // Универсальный winner через computeGameRanking — корректно работает и для
@@ -6446,7 +6702,16 @@ const podiumMedals = ['🏆', '🥈', '🥉']
             {winnerValue > 0 && (
               <div className="winner-card-score">
                 <span className="winner-card-score-n">{winnerValue}</span>
-                <span className="winner-card-score-l">{winnerUnitStr.replace(String(winnerValue) + ' ', '')}</span>
+                <span className="winner-card-score-l">
+                  {/* Срезаем «N » из начала, оставляем только подпись («оч.», «совп.» и т.п.).
+                      Если unit вернул строку без числа в начале — выводим как есть. */}
+                  {(() => {
+                    const prefix = String(winnerValue) + ' '
+                    return winnerUnitStr.startsWith(prefix)
+                      ? winnerUnitStr.slice(prefix.length)
+                      : winnerUnitStr
+                  })()}
+                </span>
               </div>
             )}
           </div>
@@ -6490,11 +6755,11 @@ const podiumMedals = ['🏆', '🥈', '🥉']
         )
       })()}
 
-      {/* Whoofus / Five / Associations — единый RatingList ниже уже выводит
-          места 2-5 с per-game ачивками. Отдельные стат-карточки удалены
-          чтобы не дублировать. Для «Я никогда не» сохраняется отдельная
-          карточка «🙋 Кто что делал» — она показывает балансы Было/Не было,
-          это другая размерность данных. */}
+      {/* «Факты партии» — единый блок мелких чипов с метриками. Для каждой игры
+          gameFunFacts() собирает 2–4 ключевые цифры (сколько слов угадано,
+          mvp раунда, % попаданий в большинство и т.д.). Если данных нет —
+          блок просто не рендерится. */}
+      <GameStatsBlock players={players} scores={scores} game={game}/>
 
       {/* Единый рейтинг 2-5 место. 1-е уже в большой winner-card сверху.
           Старые блоки (podium-row 2-3 и results-full-table) убраны — теперь
