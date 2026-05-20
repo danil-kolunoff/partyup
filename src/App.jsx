@@ -3108,6 +3108,14 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSetting
 
   return (
     <div>
+      {/* Унифицировано с онлайн-лобби: вместо кнопки «Назад» внизу — явный
+          выход «Выйти из игры» слева сверху. Так пользователь видит её
+          сразу и не путает с нижней нав-таб. */}
+      <div className="screen-top-bar">
+        <button className="screen-back-btn" onClick={onBack} aria-label="Выйти из игры">
+          <ArrowLeft size={16}/> Выйти из игры
+        </button>
+      </div>
       <p className="eyebrow"><Users size={13}/> Локальная игра</p>
       <h2 style={{marginBottom:6}}>Кто играет?</h2>
       <p className="lead" style={{marginBottom:14}}>{game.title} · передаём телефон по кругу</p>
@@ -3165,9 +3173,7 @@ function PlayerSetupScreen({ game, onStart, onBack, myName, settings, setSetting
       <button className="btn-primary mt-20" onClick={() => handleStart(names)}>
         <Play size={17}/> Начать игру
       </button>
-      <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}} onClick={onBack}>
-        <ArrowLeft size={15}/> Назад
-      </button>
+      {/* Кнопка «Назад» внизу убрана — выход теперь сверху слева. */}
 
       {showVibe && (
         <VibePickerModal
@@ -3648,8 +3654,8 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
   // рассинхрона между игроками. В одиночной игре — выход в меню.
   const exitBar = onExitGame ? (
     <div className="screen-top-bar">
-      <button className="screen-back-btn" onClick={onExitGame} aria-label="Завершить игру">
-        <ArrowLeft size={16}/> Завершить игру
+      <button className="screen-back-btn" onClick={onExitGame} aria-label="Выйти из игры">
+        <ArrowLeft size={16}/> Выйти из игры
       </button>
     </div>
   ) : null
