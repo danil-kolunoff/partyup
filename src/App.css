@@ -3827,3 +3827,40 @@ h3 { font-size: 17px; font-weight: 650; line-height: 1.25; }
 /* Особые акценты для 2-3 места (медаль крупнее, цвет фона мягче) */
 .rating-card-p2 { background: linear-gradient(135deg, rgba(192,192,192,0.05), rgba(167,139,250,0.04)); }
 .rating-card-p3 { background: linear-gradient(135deg, rgba(205,127,50,0.05), rgba(167,139,250,0.04)); }
+
+/* ─── Crocodile: stable timer + progress bar (без дёрганья) ────────────── */
+.croc-timer-wrap {
+  margin: 18px 0;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.croc-timer {
+  display: inline-flex; align-items: baseline;
+  font-size: 56px; font-weight: 900; line-height: 1;
+  color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 100px; justify-content: center;
+  transition: color 0.3s ease;
+}
+.croc-timer.urgent { color: #ff6b6b; }
+.croc-timer-unit {
+  font-size: 18px; font-weight: 600; color: var(--muted);
+  margin-left: 4px;
+  align-self: flex-end; padding-bottom: 6px;
+}
+.croc-timer-bar {
+  width: 100%; max-width: 320px;
+  height: 6px; border-radius: 999px;
+  background: rgba(167,139,250,0.10);
+  overflow: hidden;
+}
+.croc-timer-bar-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  /* width transition via inline style — плавная заливка */
+}
+.croc-timer.urgent ~ .croc-timer-bar .croc-timer-bar-fill,
+.croc-timer-wrap:has(.croc-timer.urgent) .croc-timer-bar-fill {
+  background: linear-gradient(90deg, #fb7185, #ef4444);
+}
+/* Стабилизация карточки слова — без scaleIn-анимации на каждом ренейме */
+.crocodile-word-display { animation: none; }

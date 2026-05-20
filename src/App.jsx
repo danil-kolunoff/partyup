@@ -1203,6 +1203,7 @@ export default function App() {
           <RoundScreen game={selectedGame} round={currentRound}
             myId={myPlayerId}
             roundIndex={roundIndex} total={totalRounds}
+            settings={settings}
             players={players} scores={scores} recordRoundScore={recordRoundScore}
             recordActiveMs={recordActiveMs}
             onNext={nextRound} onEnd={endGame} haptic={haptic}
@@ -1424,7 +1425,7 @@ const GAME_LOBBY_SCHEMA = {
   never:        [['rounds', 'Вопросов', [6, 10, 16, 24]]],
   whoofus:      [['rounds', 'Голосований', [5, 8, 12, 16]]],
   five:         [['rounds', 'Раундов', [5, 8, 12]], ['timer', 'Секунд на ответ', [5, 7, 10]]],
-  crocodile:    [['rounds', 'Раундов', [3, 5, 8, 12]], ['timer', 'Секунд на показ', [45, 60, 90]]],
+  crocodile:    [['rounds', 'Карточек в партии', [25, 50, 100]], ['timer', 'Секунд на показ', [30, 60, 90]]],
   alias:        [['rounds', 'Раундов на команду', [3, 5, 8]], ['timer', 'Секунд на ход', [30, 45, 60]], ['goal', 'Очков до победы', [25, 40, 60]]],
   whoami:       [['rounds', 'Персонажей на игрока', [1, 2, 3]]],
   associations: [['rounds', 'Слов в цепочке', [5, 8, 12, 16]]],
@@ -3489,7 +3490,7 @@ function NextRoundBtn({ roundIndex, total, onNext, onEnd, isMultiplayer, isHost 
 }
 
 /* ─── RoundScreen dispatcher ─────────────────────────────────────────────── */
-function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby }) {
+function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby, settings }) {
   // Мультиплеер-поллинг (адаптивный):
   // • если игрок в комнате один — поллинг не нужен (некому что-то менять);
   // • вкладка скрыта — пауза;
@@ -3539,7 +3540,7 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
     return () => { cancelled = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVis) }
   }, [isMultiplayer, roomId, roundIndex, onRoundSync, onGameEnded, onForceLobby, onRoundStateSync, players?.length])
 
-  const props = { game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, auth, onAvatarClick, roomId, roomRoundState, onRoundStateSync, myId }
+  const props = { game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, auth, onAvatarClick, roomId, roomRoundState, onRoundStateSync, myId, settings }
   // Универсальная кнопка завершения игры. В мультиплеере ОБЯЗАТЕЛЬНО завершает
   // игру для ВСЕХ (DO state='lobby', roundIndex=0, round=null), чтобы не было
   // рассинхрона между игроками. В одиночной игре — выход в меню.
@@ -5223,12 +5224,14 @@ function GenericRound({ game, round, roundIndex, total, players, onNext, onEnd, 
 }
 
 /* ─── CrocodileRound ─────────────────────────────────────────────────────── */
-function CrocodileRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth }) {
+function CrocodileRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth, settings }) {
   // Активный игрок показывает слово (видит его на своём экране), остальные
   // угадывают вслух. В MP — слово видит ТОЛЬКО активный игрок; остальные
   // видят таймер и подсказку «угадывайте вслух».
   const activePlayer = players[roundIndex % players.length]
   const isActor = !isMultiplayer || (myId && String(activePlayer.id) === String(myId))
+  // Время раунда из настроек лобби (30/60/90); по умолчанию 30.
+  const ROUND_SEC = Number(settings?.timer) || 30
 
   // MP-state: { phase, startedAt }
   const mpPhase = roomRoundState?.phase || 'ready'
@@ -5237,9 +5240,10 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
   const [localStartedAt, setLocalStartedAt] = useState(0)
   const phase = isMultiplayer ? mpPhase : localPhase
   const startedAt = isMultiplayer ? mpStartedAt : localStartedAt
-  const ROUND_SEC = 60
 
-  // Синхронный таймер
+  // Синхронный таймер — обновляем секундный счётчик раз в 250мс. Используем
+  // useRef для самого значения чтобы не плодить re-render'ы; setNow только
+  // для триггера перерисовки.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (phase !== 'playing' || !startedAt) return
@@ -5249,10 +5253,19 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
   const elapsed = startedAt ? (now - startedAt) / 1000 : 0
   const timeLeft = Math.max(0, Math.ceil(ROUND_SEC - elapsed))
 
-  // Авто-переход в result когда время вышло
+  // Защита от write-loop'а: после ОДНОГО перехода в result больше не дёргаем
+  // авто-переход (elapsed >= ROUND_SEC остаётся true ещё какое-то время до
+  // того, как сервер пришлёт phase='result' через poll).
+  const autoTransitFiredRef = useRef(false)
   useEffect(() => {
-    if (phase !== 'playing' || !startedAt) return
+    // Сброс flag при новом раунде
+    if (phase === 'ready' || phase === 'result') autoTransitFiredRef.current = false
+  }, [phase])
+
+  useEffect(() => {
+    if (phase !== 'playing' || !startedAt || autoTransitFiredRef.current) return
     if (elapsed >= ROUND_SEC) {
+      autoTransitFiredRef.current = true
       if (isMultiplayer && isActor && roomId) {
         const next = { phase: 'result', startedAt }
         onRoundStateSync?.(next)
@@ -5264,10 +5277,11 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
       }
       haptic?.('success')
     }
-  }, [elapsed, phase, startedAt, isMultiplayer, isActor, roomId, onRoundStateSync, haptic])
+  }, [elapsed, phase, startedAt, isMultiplayer, isActor, roomId, onRoundStateSync, haptic, ROUND_SEC])
 
   const start = async () => {
     haptic('impact')
+    autoTransitFiredRef.current = false
     const ts = Date.now()
     if (isMultiplayer && isActor && roomId) {
       const next = { phase: 'playing', startedAt: ts }
@@ -5291,17 +5305,25 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
     }
   }
 
+  // Защита от двойных нажатий (отправляем nextRound один раз)
+  const advancingRef = useRef(false)
   const handleGuessed = async () => {
+    if (advancingRef.current) return
+    advancingRef.current = true
     haptic('success')
     recordRoundScore?.({ [activePlayer.id]: 2 })
     await reset(); onNext()
   }
   const handleMissed = async () => {
+    if (advancingRef.current) return
+    advancingRef.current = true
     haptic('impact')
     await reset(); onNext()
   }
 
   const urgentTime = timeLeft <= 10
+  // Прогресс-бар вместо «прыгающего» текста — плавная анимация по CSS.
+  const progressPct = Math.max(0, Math.min(100, (timeLeft / ROUND_SEC) * 100))
 
   return (
     <div>
@@ -5323,7 +5345,7 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
               Только жесты и мимика — ни слова!<br/>Остальные угадывают.
             </p>
           </div>
-          <button className="btn-primary mt-16" onClick={start}><Play size={17}/> Поехали! (60 сек)</button>
+          <button className="btn-primary mt-16" onClick={start}><Play size={17}/> Поехали! ({ROUND_SEC} сек)</button>
         </>
       )}
       {phase === 'ready' && !isActor && (
@@ -5341,7 +5363,13 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
 
       {phase === 'playing' && (
         <>
-          <div className={`alias-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}с</div>
+          <div className="croc-timer-wrap">
+            <div className={`croc-timer ${urgentTime ? 'urgent' : ''}`}>{timeLeft}<span className="croc-timer-unit">с</span></div>
+            <div className="croc-timer-bar">
+              <div className="croc-timer-bar-fill"
+                style={{width: progressPct + '%', transition: 'width 0.25s linear'}}/>
+            </div>
+          </div>
           {isActor ? (
             <div className="crocodile-word-display">
               <div className="crocodile-word">{round.promptText}</div>
@@ -5351,6 +5379,14 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
             <div className="crocodile-word-display">
               <div className="crocodile-word" style={{fontSize:32}}>🎭</div>
               <div className="crocodile-hint">Угадывайте вслух — что показывает {activePlayer.name}?</div>
+            </div>
+          )}
+          {/* Кнопки доступны ВО ВРЕМЯ показа — активный игрок может закрыть
+              раунд в любой момент, не дожидаясь конца таймера. */}
+          {isActor && (
+            <div className="five-result-btns" style={{marginTop:18}}>
+              <button className="five-btn-success" onClick={handleGuessed}><Check size={20}/> Угадали!</button>
+              <button className="five-btn-fail" onClick={handleMissed}><X size={20}/> Не угадали</button>
             </div>
           )}
         </>
