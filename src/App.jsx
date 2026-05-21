@@ -3679,6 +3679,13 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
         // не работает в SCREENS.ROUND) — у хоста таймер был 60с, у гостя 30с.
         if (serverRoom.settings && onSettingsSync) onSettingsSync(serverRoom.settings)
         if (serverRoom.state === 'ended') { onGameEnded?.(); return }
+        // Защита от рассинхрона gameId: если хост сменил игру и гость не
+        // подхватил это в лобби (race condition между «выбрал игру» и
+        // «нажал старт»), у клиентов будут разные deck'и — кикаем гостя в
+        // лобби, там polling LobbyScreen синкнёт правильный gameId.
+        if (serverRoom.gameId && game?.id && serverRoom.gameId !== game.id && onForceLobby) {
+          onForceLobby(); return
+        }
         if (serverRoom.roundIndex > roundIndex) { onRoundSync?.(serverRoom.roundIndex); return }
         if (serverRoom.roundIndex < roundIndex) { schedule(); return }
         // Хост принудительно вернул всех в лобби (кнопка "Завершить игру").
@@ -3822,11 +3829,11 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
     if (!rs?.choice || !rs?.pickedBy) return
     if (truthCommittedRef.current.has(roundIndex)) return
     truthCommittedRef.current.add(roundIndex)
+    const pl = players.find(p => String(p.id) === String(rs.pickedBy))
+    const pname = pl?.name || `Игрок`
     try {
       const k = 'pu_truth_stats'
       const all = JSON.parse(localStorage.getItem(k) || '{}')
-      const pl = players.find(p => String(p.id) === String(rs.pickedBy))
-      const pname = pl?.name || `Игрок`
       const s = all[rs.pickedBy] || { name: pname, truths: 0, dares: 0 }
       s.name = pname
       if (rs.choice === 'truth') s.truths += 1
@@ -3834,7 +3841,15 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
       all[rs.pickedBy] = s
       localStorage.setItem(k, JSON.stringify(all))
     } catch {}
-  }, [roomRoundState?.choice, roomRoundState?.pickedBy, roundIndex, isMultiplayer, players])
+    // Server-side stats — шлёт ТОЛЬКО активный игрок (myId === pickedBy),
+    // чтобы избежать N-кратного дублирования при коммите всех клиентов.
+    if (roomId && String(rs.pickedBy) === String(myId)) {
+      const deltas = rs.choice === 'truth' ? { truth_truths: 1 } : { truth_dares: 1 }
+      api.roomAction(roomId, {
+        statsDelta: { playerId: rs.pickedBy, deltas, set: { name: pname } },
+      }).catch(() => {})
+    }
+  }, [roomRoundState?.choice, roomRoundState?.pickedBy, roundIndex, isMultiplayer, players, roomId, myId])
 
   // ── Выбор Правда/Действие ──
   const pick = async (type) => {
@@ -4022,7 +4037,24 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
       }
       localStorage.setItem('pu_never_stats', JSON.stringify(prev))
     } catch {}
-  }, [everyoneVoted, roundIndex, players, votes])
+    // Server-side stats — шлёт ТОЛЬКО хост (одна запись на пользователя,
+    // избегаем N-кратного дублирования). Остальные клиенты подтянут через
+    // room.stats polling.
+    if (isHost && roomId) {
+      ;(async () => {
+        for (const p of players) {
+          const v = votes[p.id]
+          if (!v) continue
+          const deltas = v === 'yes' ? { never_yes: 1 } : { never_no: 1 }
+          try {
+            await api.roomAction(roomId, {
+              statsDelta: { playerId: p.id, deltas, set: { name: p.name } },
+            })
+          } catch {}
+        }
+      })()
+    }
+  }, [everyoneVoted, roundIndex, players, votes, isHost, roomId])
 
   const submitVote = async (val) => {
     if (myVote || !myId) return
@@ -4039,7 +4071,12 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
     }
   }
 
+  // Защита от двойного advance (любой клиент может нажать «Следующий»).
+  const neverAdvancingRef = useRef(false)
+  useEffect(() => { neverAdvancingRef.current = false }, [roundIndex])
   const handleNext = async () => {
+    if (neverAdvancingRef.current) return
+    neverAdvancingRef.current = true
     // pu_never_stats теперь обновляется в useEffect выше — у каждого клиента
     // независимо, как только все проголосовали. handleNext только продвигает
     // раунд.
@@ -4099,16 +4136,12 @@ function NeverHaveIRound({ game, round, roundIndex, total, players, onNext, onEn
               )
             })}
           </div>
-          {(isHost || players.length === 1) ? (
-            <button className="btn-primary no-pulse mt-16"
-              onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
-              {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
-            </button>
-          ) : (
-            <div className="mp-waiting-hint mt-16">
-              <Clock size={14}/> Ждём «Следующий» от хоста
-            </div>
-          )}
+          {/* «Следующий/Итоги» доступен ВСЕМ — иначе при уходе хоста раунд
+              застревает. neverAdvancingRef защищает от двойного нажатия. */}
+          <button className="btn-primary no-pulse mt-16"
+            onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
+            {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
+          </button>
         </div>
       )}
     </div>
@@ -4272,8 +4305,14 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
     }
   }
 
-  const handleNext = async () => {
-    // Накопим финальные ачивки: за кого голосовали — получает «балл узнаваемости»
+  // Per-client commit при everyoneVoted — каждый клиент пишет своё
+  // pu_whoofus_stats (раньше писал только хост в handleNext, и у гостей
+  // на финиш-экране была пустая статистика). Server-stats шлёт только хост.
+  const whoofusCommittedRef = useRef(new Set())
+  useEffect(() => {
+    if (!everyoneVoted) return
+    if (whoofusCommittedRef.current.has(roundIndex)) return
+    whoofusCommittedRef.current.add(roundIndex)
     try {
       const k = 'pu_whoofus_stats'
       const prev = JSON.parse(localStorage.getItem(k) || '{}')
@@ -4283,7 +4322,36 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
       }
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
-    // App.nextRound сам обнулит roomRoundState при смене roundIndex.
+    if (isHost && roomId) {
+      ;(async () => {
+        const tally = {}
+        for (const v of Object.values(votes)) {
+          if (!v) continue
+          tally[v] = (tally[v] || 0) + 1
+        }
+        for (const [pid, n] of Object.entries(tally)) {
+          const p = players.find(x => String(x.id) === String(pid))
+          try {
+            await api.roomAction(roomId, {
+              statsDelta: {
+                playerId: pid,
+                deltas: { whoofus_votes: Number(n) },
+                set: { name: p?.name || '' },
+              },
+            })
+          } catch {}
+        }
+      })()
+    }
+  }, [everyoneVoted, roundIndex, votes, players, isHost, roomId])
+
+  // Защита от двойного advance (любой клиент может нажать «Следующий»).
+  const whoofusAdvancingRef = useRef(false)
+  useEffect(() => { whoofusAdvancingRef.current = false }, [roundIndex])
+  const handleNext = async () => {
+    if (whoofusAdvancingRef.current) return
+    whoofusAdvancingRef.current = true
+    // localStorage и server-stats уже зафиксированы через useEffect выше.
     onNext()
   }
 
@@ -4341,16 +4409,12 @@ function VoteRoundMP({ game, round, roundIndex, total, players, onNext, onEnd, h
             {/* Детальный список «кто за кого» убран по запросу — оставляем
                 только победителей и количество голосов. */}
           </div>
-          {(isHost || players.length === 1) ? (
-            <button className="btn-primary no-pulse mt-16"
-              onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
-              {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
-            </button>
-          ) : (
-            <div className="mp-waiting-hint mt-16">
-              <Clock size={14}/> Ждём «Следующий» от хоста
-            </div>
-          )}
+          {/* «Следующий/Итоги» доступен ВСЕМ — иначе при уходе хоста раунд
+              застревает. whoofusAdvancingRef защищает от двойного нажатия. */}
+          <button className="btn-primary no-pulse mt-16"
+            onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
+            {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
+          </button>
         </>
       )}
     </div>
@@ -6208,10 +6272,10 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
       }
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
-    // Server-side stats (для финиш-экрана у всех клиентов).
-    if (roomId) {
+    // Server-side stats — шлёт ТОЛЬКО хост (избегаем N-кратного дублирования
+    // при нажатии «Следующий» несколькими клиентами).
+    if (isHost && roomId) {
       try {
-        // batch — отправляем все деление в одном POST'е (одна запись на player)
         for (const [pid, pts] of Object.entries(matchedScores)) {
           const player = players.find(p => String(p.id) === String(pid))
           await api.roomAction(roomId, {
@@ -6299,16 +6363,13 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
               🎯 {matchCount} ответ{matchCount === 1 ? '' : matchCount < 5 ? 'а' : 'ов'} в общую волну!
             </div>
           )}
-          {(isHost || players.length === 1) ? (
-            <button className="btn-primary no-pulse mt-16"
-              onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
-              {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
-            </button>
-          ) : (
-            <div className="mp-waiting-hint mt-16">
-              <Clock size={14}/> Ждём «Следующий» от хоста
-            </div>
-          )}
+          {/* «Следующий/Итоги» доступен ВСЕМ — assocAdvancingRef защищает
+              от двойного нажатия, server-stats шлются только из handleNext
+              (если кто-то нажмёт повторно — флаг блокирует). */}
+          <button className="btn-primary no-pulse mt-16"
+            onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
+            {roundIndex >= total - 1 ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
+          </button>
         </>
       )}
     </div>
@@ -7160,11 +7221,18 @@ const podiumMedals = ['🏆', '🥈', '🥉']
       {game.id === 'never' && (() => {
         let stats = {}
         try { stats = JSON.parse(localStorage.getItem('pu_never_stats') || '{}') } catch {}
-        const rows = players.map(p => ({
-          ...p,
-          yes: Number(stats[p.id]?.yes || 0),
-          no:  Number(stats[p.id]?.no  || 0),
-        })).filter(r => r.yes + r.no > 0)
+        // В mp предпочитаем room.stats (server-aggregated, единая для всех),
+        // localStorage — fallback для single-player.
+        const rows = players.map(p => {
+          const rs = roomStats?.[p.id]
+          const yes = (rs && typeof rs.never_yes === 'number')
+            ? Number(rs.never_yes) || 0
+            : Number(stats[p.id]?.yes || 0)
+          const no = (rs && typeof rs.never_no === 'number')
+            ? Number(rs.never_no) || 0
+            : Number(stats[p.id]?.no || 0)
+          return { ...p, yes, no }
+        }).filter(r => r.yes + r.no > 0)
         if (!rows.length) return null
         rows.sort((a, b) => b.yes - a.yes)
         return (
