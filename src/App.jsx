@@ -834,6 +834,10 @@ export default function App() {
     try { localStorage.removeItem('pu_truth_stats') } catch {}
 
     // Универсальная функция: тасуем пул и берём первые N карточек.
+    // Для alias/crocodile/whoami раундов много (rounds * players), а слов
+    // в одном раунде ещё больше (alias: ~15 за 30 сек) — берём ВЕСЬ пул,
+    // чтобы слова не повторялись в течение партии. Для остальных игр
+    // достаточно settings.rounds карточек.
     const buildDeck = () => {
       const dbPool = cardsCache[`${selectedGame?.id}|${picker.vibe || ''}`] || null
       const basePool = (dbPool && dbPool.length > 0)
@@ -847,7 +851,11 @@ export default function App() {
         const j = Math.floor(Math.random() * (i + 1))
         ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
       }
-      return shuffled.slice(0, Math.max(1, settings.rounds || 25))
+      const fullDeckGames = ['alias', 'crocodile', 'whoami']
+      const targetN = fullDeckGames.includes(selectedGame?.id)
+        ? shuffled.length
+        : Math.max(1, settings.rounds || 25)
+      return shuffled.slice(0, targetN)
         .map(p => ({
           id: p.id ?? null, type: p.type, text: p.text,
           vibes: p.vibes ?? null, wr_a: p.wr_a ?? 0, wr_b: p.wr_b ?? 0,
@@ -898,12 +906,14 @@ export default function App() {
     } catch {}
   }, [sessionDbId, scores, players])
 
-  const nextRound = useCallback(async () => {
-    if (roundIndex >= totalRounds - 1) {
+  const nextRound = useCallback(async (forceLast = false) => {
+    if (forceLast || roundIndex >= totalRounds - 1) {
       haptic('success')
       ev.gameFinish(selectedGame.id, { vibe: picker.vibe, rounds: totalRounds, completed: true })
       finishSessionRemote(totalRounds)
-      if (isMultiplayer && isHost && roomId) {
+      // Любой клиент шлёт state='ended' — гости тоже могут завершить партию
+      // (например, нажав «Итоги» в alias на последнем ходе).
+      if (isMultiplayer && roomId) {
         try { await api.roomAction(roomId, { state: 'ended' }) }
         catch (e) { console.error('Failed to end room', e) }
       }
@@ -926,13 +936,14 @@ export default function App() {
     haptic('success')
     ev.gameFinish(selectedGame.id, { vibe: picker.vibe, rounds: roundIndex + 1, completed: false })
     finishSessionRemote(roundIndex + 1)
-    // В мультиплеере: ХОСТ принудительно завершает партию для всех.
-    // DO state='ended' → гости через poll увидят и тоже попадут в RESULTS.
-    if (isMultiplayer && isHost && roomId) {
+    // ЛЮБОЙ клиент дёргает state='ended' — иначе гости попадают на RESULTS
+    // локально, polling видит на сервере state='playing' и перебрасывает
+    // обратно (раньше only host шёл).
+    if (isMultiplayer && roomId) {
       try { await api.roomAction(roomId, { state: 'ended' }) } catch {}
     }
     navigate(SCREENS.RESULTS)
-  }, [haptic, navigate, selectedGame, picker.vibe, roundIndex, finishSessionRemote, isMultiplayer, isHost, roomId])
+  }, [haptic, navigate, selectedGame, picker.vibe, roundIndex, finishSessionRemote, isMultiplayer, roomId])
 
   const togglePlayerReady = useCallback((playerId) => {
     setRoom(r => r ? ({
@@ -1238,12 +1249,25 @@ export default function App() {
             myId={myPlayerId}
             roundIndex={roundIndex} total={totalRounds}
             settings={settings}
+            room={room}
             players={players} scores={scores} recordRoundScore={recordRoundScore}
             recordActiveMs={recordActiveMs}
             onNext={nextRound} onEnd={endGame} haptic={haptic}
             isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
             onRoundSync={(idx) => { setRoundIndex(idx); setRoomRoundState(null) }}
             onRoomStatsSync={(s) => setRoom(r => r ? { ...r, stats: s } : r)}
+            onSettingsSync={(srv) => {
+              // Гости подтягивают settings от хоста. timer/rounds могут отличаться
+              // если гость не получил последний push до перехода в раунд.
+              if (isHost) return
+              setSettings(cur => {
+                const next = { ...cur }
+                let changed = false
+                if (typeof srv.rounds === 'number' && srv.rounds !== cur.rounds) { next.rounds = srv.rounds; changed = true }
+                if (typeof srv.timer === 'number' && srv.timer !== cur.timer) { next.timer = srv.timer; changed = true }
+                return changed ? next : cur
+              })
+            }}
             onRoundStateSync={(rs) => setRoomRoundState(prev => {
               // Dedupe по полной JSON-сигнатуре (учитывает votes для NeverHaveI).
               const a = prev ? JSON.stringify(prev) : 'null'
@@ -3459,6 +3483,14 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
             <span className="lobby-settings-key"><Dices size={12}/> {lobbyCountLabel(game)}</span>
             <span className="lobby-settings-val">{settings.rounds}</span>
           </div>
+          {/* Гостям показываем timer (alias/crocodile) — раньше его не было
+              видно вообще, а хост спокойно его менял. */}
+          {(game?.id === 'alias' || game?.id === 'crocodile') && (
+            <div className="lobby-settings-row">
+              <span className="lobby-settings-key"><Timer size={12}/> Секунд на ход</span>
+              <span className="lobby-settings-val">{Number(settings.timer) || (game?.id === 'crocodile' ? 30 : 45)}</span>
+            </div>
+          )}
           <div className="lobby-settings-row">
             <span className="lobby-settings-key"><VibeIcon vibeId={currentVibe} size={12}/> Вайб</span>
             <span className="lobby-settings-val">{VIBES.find(v=>v.id===currentVibe)?.label || 'Разогрев'}</span>
@@ -3615,7 +3647,7 @@ function NextRoundBtn({ roundIndex, total, onNext, onEnd, isMultiplayer, isHost 
 }
 
 /* ─── RoundScreen dispatcher ─────────────────────────────────────────────── */
-function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby, settings, onRoomStatsSync }) {
+function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby, settings, onRoomStatsSync, onSettingsSync, room }) {
   // Мультиплеер-поллинг (адаптивный):
   // • если игрок в комнате один — поллинг не нужен (некому что-то менять);
   // • вкладка скрыта — пауза;
@@ -3642,6 +3674,10 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
         // Подтягиваем server-aggregated stats — чтобы на финиш-экране у всех
         // была одинаковая статистика (а не «у себя — есть, у других — 0»).
         if (serverRoom.stats && onRoomStatsSync) onRoomStatsSync(serverRoom.stats)
+        // Settings sync — гость подтягивает rounds/timer от хоста. Раньше
+        // settings.timer не доходил до гостей в раунде (polling LobbyScreen
+        // не работает в SCREENS.ROUND) — у хоста таймер был 60с, у гостя 30с.
+        if (serverRoom.settings && onSettingsSync) onSettingsSync(serverRoom.settings)
         if (serverRoom.state === 'ended') { onGameEnded?.(); return }
         if (serverRoom.roundIndex > roundIndex) { onRoundSync?.(serverRoom.roundIndex); return }
         if (serverRoom.roundIndex < roundIndex) { schedule(); return }
@@ -3668,7 +3704,7 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
     return () => { cancelled = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVis) }
   }, [isMultiplayer, roomId, roundIndex, onRoundSync, onGameEnded, onForceLobby, onRoundStateSync, players?.length])
 
-  const props = { game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, auth, onAvatarClick, roomId, roomRoundState, onRoundStateSync, myId, settings }
+  const props = { game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, auth, onAvatarClick, roomId, roomRoundState, onRoundStateSync, myId, settings, room }
   // Универсальная кнопка завершения игры. В мультиплеере ОБЯЗАТЕЛЬНО завершает
   // игру для ВСЕХ (DO state='lobby', roundIndex=0, round=null), чтобы не было
   // рассинхрона между игроками. В одиночной игре — выход в меню.
@@ -4642,14 +4678,24 @@ function SpyRound({ game, round, roundIndex, total, players, onNext, onEnd, hapt
 }
 
 /* ─── AliasRound ─────────────────────────────────────────────────────────── */
-function AliasRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth, settings }) {
+function AliasRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth, settings, room }) {
   // Каждый игрок получает фиксированное число раундов (settings.rounds).
   // За один раунд: показывается набор слов; за каждое «Угадали» +1 балл
   // объясняющему, «Пропустить» — следующее слово без штрафа.
   // Когда все раунды у всех игроков отыграны → финальный экран.
   const activePlayer = players[roundIndex % players.length]
   const isExplainer = !isMultiplayer || (myId && String(activePlayer.id) === String(myId))
-  const words = game.samplePrompts || []
+  // Используем большой shuffled deck из DO (buildDeck для alias возвращает
+  // весь пул) — гарантия что слова не повторяются в течение партии.
+  // wordOffset — смещение для этого раунда в общем deck'е.
+  const fullPool = (room?.deck && Array.isArray(room.deck) && room.deck.length > 0)
+    ? room.deck.map(d => d.text ? d : { text: d })
+    : (game.samplePrompts || [])
+  const WORDS_PER_TURN_MAX = 20 // запас слов на ход
+  const wordOffset = roundIndex * WORDS_PER_TURN_MAX
+  const words = fullPool.slice(wordOffset, wordOffset + WORDS_PER_TURN_MAX)
+  // Fallback на циклический pool, если deck закончился (>200 раундов).
+  const safeWords = words.length > 0 ? words : fullPool
 
   // Настройки игры (берутся из лобби; default 30s, 5 раундов/игрока).
   const ROUND_SEC = Number(settings?.timer) || 30
@@ -4769,9 +4815,18 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     if (aliasFlushTimer.current) clearTimeout(aliasFlushTimer.current)
     aliasFlushTimer.current = setTimeout(() => { flushAliasBuf().catch(() => {}) }, 1200)
   }
+
+  // 2-секундный cooldown на кнопки «Угадали»/«Пропустить» — защита от
+  // случайного двойного нажатия + от сетевой задержки оптимистичного апдейта.
+  const [btnDisabledUntil, setBtnDisabledUntil] = useState(0)
+  const isBtnDisabled = now < btnDisabledUntil
+  const cdSecLeft = isBtnDisabled ? Math.max(1, Math.ceil((btnDisabledUntil - now) / 1000)) : 0
+
   const correct = () => {
+    if (isBtnDisabled) return
+    setBtnDisabledUntil(Date.now() + 2000)
     haptic('impact')
-    const ni = Math.min(wordIdx + 1, Math.max(0, words.length - 1))
+    const ni = Math.min(safeWords.length > 0 ? wordIdx + 1 : 0, Math.max(0, safeWords.length - 1))
     if (isMultiplayer && isExplainer) {
       setLocalBufScore(b => ({ correct: (b.correct||0) + 1, skipped: b.skipped||0 }))
       setLocalBufWordIdx(ni)
@@ -4782,7 +4837,10 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     }
   }
   const skip = () => {
-    const ni = Math.min(wordIdx + 1, Math.max(0, words.length - 1))
+    if (isBtnDisabled) return
+    setBtnDisabledUntil(Date.now() + 2000)
+    haptic('impact')
+    const ni = Math.min(safeWords.length > 0 ? wordIdx + 1 : 0, Math.max(0, safeWords.length - 1))
     if (isMultiplayer && isExplainer) {
       setLocalBufScore(b => ({ correct: b.correct||0, skipped: (b.skipped||0) + 1 }))
       setLocalBufWordIdx(ni)
@@ -4800,8 +4858,7 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
     if (advancingRef.current) return
     advancingRef.current = true
     if (score.correct > 0) recordRoundScore?.({ [activePlayer.id]: score.correct })
-    // ── Per-player статистика партии (для финиш-экрана) ───────────────────
-    // pu_alias_stats: { [pid]: { name, turns, totalCorrect, totalSkipped, bestRound } }
+    // Локальные pu_alias_stats — для single-player.
     try {
       const k = 'pu_alias_stats'
       const all = JSON.parse(localStorage.getItem(k) || '{}')
@@ -4815,8 +4872,24 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
       localStorage.setItem(k, JSON.stringify(all))
     } catch {}
     if (isMultiplayer && roomId) {
-      // DO сам обнулит round при смене roundIndex; не дёргаем roomRoundState(null)
-      // здесь, чтобы не было мерцания «pre-start» экрана на следующий 1 кадр.
+      // Server-side stats (для финиш-экрана у всех клиентов).
+      try {
+        const cur = Number(score.correct || 0)
+        const sk  = Number(score.skipped || 0)
+        // bestRound — переписываем только если новое лучше. Используем set
+        // (нет «atomic max» — у нас два запроса, но рассинхрон ничтожен).
+        const prevBest = Number(room?.stats?.[activePlayer.id]?.alias_best || 0)
+        await api.roomAction(roomId, {
+          statsDelta: {
+            playerId: activePlayer.id,
+            deltas: { alias_correct: cur, alias_skipped: sk, alias_turns: 1 },
+            set: {
+              name: activePlayer.name,
+              ...(cur > prevBest ? { alias_best: cur } : {}),
+            },
+          },
+        })
+      } catch {}
     }
     onNext()
   }
@@ -4887,10 +4960,13 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
             </div>
           </div>
 
-          {/* Карточка со словом */}
+          {/* Карточка со словом — берём из общего deck'а через wordOffset,
+              слова в течение партии не повторяются (см. fullPool/wordOffset). */}
           {isExplainer ? (
             <div className="alias-word-card-v2" key={wordIdx}>
-              <div className="alias-word-v2">{words[wordIdx % words.length]?.text || '—'}</div>
+              <div className="alias-word-v2">
+                {safeWords[wordIdx % Math.max(1, safeWords.length)]?.text || '—'}
+              </div>
               <div className="alias-word-progress">слово #{wordIdx + 1}</div>
             </div>
           ) : (
@@ -4914,14 +4990,15 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
             </div>
           </div>
 
-          {/* Кнопки действия — только у объясняющего */}
+          {/* Кнопки действия — только у объясняющего. 2с cooldown после
+              нажатия, чтобы не было spam'а и спорных счётчиков. */}
           {isExplainer && (
             <div className="five-result-btns" style={{marginTop:18}}>
-              <button className="five-btn-success" onClick={correct}>
-                <Check size={20}/> Угадали
+              <button className="five-btn-success" onClick={correct} disabled={isBtnDisabled}>
+                <Check size={20}/> {isBtnDisabled ? `Угадали (${cdSecLeft})` : 'Угадали'}
               </button>
-              <button className="five-btn-fail" onClick={skip}>
-                <ChevronRight size={20}/> Пропустить
+              <button className="five-btn-fail" onClick={skip} disabled={isBtnDisabled}>
+                <ChevronRight size={20}/> {isBtnDisabled ? `Пропустить (${cdSecLeft})` : 'Пропустить'}
               </button>
             </div>
           )}
@@ -4937,18 +5014,22 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
             <div className="alias-result-label-v2">
               {score.correct === 1 ? 'слово' : score.correct < 5 ? 'слова' : 'слов'} угадано
             </div>
-            <div className="alias-result-meta">
-              {score.skipped > 0 && <span>⏭ Пропущено: {score.skipped}</span>}
-              <span>· У {activePlayer.name} {Math.max(0, ROUNDS_PER_PLAYER - playerTurn)} ход{
-                (ROUNDS_PER_PLAYER - playerTurn) === 1 ? '' : 'а'} осталось</span>
-            </div>
+            {score.skipped > 0 && (
+              <div className="alias-result-meta">
+                <span>⏭ Пропущено: {score.skipped}</span>
+              </div>
+            )}
           </div>
-          {(isExplainer || !isMultiplayer) ? (
-            <button className="btn-primary no-pulse mt-16"
-              onClick={roundIndex >= total - 1 ? onEnd : handleNext}>
-              {roundIndex >= total - 1
-                ? <><Trophy size={17}/> Итоги</>
-                : <><ChevronRight size={17}/> Следующий ход</>}
+          {/* Последний раунд — «Итоги» доступны ВСЕМ (раньше ждали кнопки от
+              explainer'а, и гости висели). Любой нажавший дёрнет state='ended'
+              на сервере → все клиенты увидят и попадут на RESULTS. */}
+          {roundIndex >= total - 1 ? (
+            <button className="btn-primary no-pulse mt-16" onClick={onEnd}>
+              <Trophy size={17}/> Итоги
+            </button>
+          ) : (isExplainer || !isMultiplayer) ? (
+            <button className="btn-primary no-pulse mt-16" onClick={handleNext}>
+              <ChevronRight size={17}/> Следующий ход
             </button>
           ) : (
             <div className="mp-waiting-hint mt-16">
@@ -5652,23 +5733,13 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
     }
   }
 
-  const reset = async () => {
-    if (isMultiplayer && roomId) {
-      // DO сам обнулит round при смене roundIndex (это делается следующим
-      // POST'ом roundIndex). roomRoundState(null) НЕ делаем тут — иначе
-      // на 1 кадр всплывёт «pre-start» экран между двумя раундами.
-    } else {
-      setLocalPhase('ready'); setLocalStartedAt(0)
-    }
-  }
-
   // Защита от двойных нажатий (отправляем nextRound один раз).
   // ВАЖНО: сбрасываем флаг при смене roundIndex — иначе следующий раунд
   // не сможет нажать "Угадали/Не угадали".
   const advancingRef = useRef(false)
   useEffect(() => { advancingRef.current = false }, [roundIndex])
-  // pu_croco_stats: { [pid]: { name, shown, guessed, missed } }
-  // shown = сколько раз игрок показывал; guessed = из них угадано группой; missed = промахи.
+  // pu_croco_stats: { [pid]: { name, shown, guessed, missed } } — для single-player.
+  // В mp используется room.stats через statsDelta (server-aggregated).
   const bumpCrocoStat = (key) => {
     try {
       const k = 'pu_croco_stats'
@@ -5682,21 +5753,48 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
       localStorage.setItem(k, JSON.stringify(all))
     } catch {}
   }
-  const handleGuessed = async () => {
+  // Reveal-фаза: после «Угадали/Не угадали» показываем 3 секунды слово
+  // и результат — чтобы участники успели проверить, что именно угадывали.
+  const revealTimerRef = useRef(null)
+  const triggerNextWithReveal = async (key) => {
     if (advancingRef.current) return
     advancingRef.current = true
-    haptic('success')
-    recordRoundScore?.({ [activePlayer.id]: 2 })
-    bumpCrocoStat('guessed')
-    await reset(); onNext()
+    if (key === 'guessed') {
+      haptic('success')
+      recordRoundScore?.({ [activePlayer.id]: 2 })
+    } else {
+      haptic('impact')
+    }
+    bumpCrocoStat(key)
+    if (isMultiplayer && roomId) {
+      // 1) statsDelta на сервер — для финиш-экрана всем.
+      try { await api.roomAction(roomId, {
+        statsDelta: {
+          playerId: activePlayer.id,
+          deltas: key === 'guessed' ? { croco_guessed: 1 } : { croco_missed: 1 },
+          set: { name: activePlayer.name },
+        },
+      }) } catch {}
+      // 2) Publish reveal-фазу (phase='reveal', result, word) для всех.
+      try {
+        const next = { phase: 'reveal', startedAt, result: key, word: round.promptText }
+        onRoundStateSync?.(next)
+        await fetch(`/api/room/${roomId}/action`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ round: next }) })
+      } catch {}
+    } else {
+      setLocalPhase('reveal')
+    }
+    // Через 3 секунды — продвигаем раунд (у активного / в локалке)
+    if (revealTimerRef.current) clearTimeout(revealTimerRef.current)
+    revealTimerRef.current = setTimeout(() => {
+      onNext()
+    }, 3000)
   }
-  const handleMissed = async () => {
-    if (advancingRef.current) return
-    advancingRef.current = true
-    haptic('impact')
-    bumpCrocoStat('missed')
-    await reset(); onNext()
-  }
+  useEffect(() => () => { if (revealTimerRef.current) clearTimeout(revealTimerRef.current) }, [])
+  const handleGuessed = () => triggerNextWithReveal('guessed')
+  const handleMissed = () => triggerNextWithReveal('missed')
 
   const urgentTime = timeLeft <= 10
   // Прогресс-бар вместо «прыгающего» текста — плавная анимация по CSS.
@@ -5796,6 +5894,24 @@ function CrocodileRound({ game, round, roundIndex, total, players, recordRoundSc
             </div>
           )}
         </>
+      )}
+
+      {/* Reveal — 3 секунды показываем загаданное слово всем участникам,
+          чтобы они могли проверить, что именно угадывали. */}
+      {phase === 'reveal' && (
+        <div className="crocodile-word-display" style={{textAlign:'center', marginTop:16}}>
+          <div style={{fontSize:13, color:'var(--muted)', marginBottom:8}}>
+            {(roomRoundState?.result || 'guessed') === 'guessed'
+              ? <><Check size={14} style={{verticalAlign:'-2px'}}/> Угадали слово</>
+              : <><X size={14} style={{verticalAlign:'-2px'}}/> Не угадали</>}
+          </div>
+          <div className="crocodile-word">
+            {roomRoundState?.word || round.promptText}
+          </div>
+          <div className="crocodile-hint" style={{marginTop:10}}>
+            Следующий ход через 3 секунды…
+          </div>
+        </div>
       )}
     </div>
   )
