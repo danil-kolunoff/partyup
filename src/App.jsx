@@ -5043,215 +5043,183 @@ function AliasRound({ game, round, roundIndex, total, players, recordRoundScore,
 }
 
 /* ─── WhoAmIRound ────────────────────────────────────────────────────────── */
-function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth }) {
-  // Активный игрок (по очереди) — «загадан»: ОН НЕ должен видеть свой
-  // персонаж, остальные видят и отвечают вслух «да/нет».
-  // В MP это означает: на устройстве активного — поле для угадывания;
-  // на остальных — карточка с персонажем.
-  // В local (один телефон) — пасс-и-плей: показать персонажа всем, кроме
-  // активного, потом передать телефон.
-  const [phase, setPhase] = useState('setup') // 'setup' | 'playing' | 'guessed'
-  const [qCount, setQCount] = useState(0)
-  const [guessInput, setGuessInput] = useState('')
-  const [wrongGuess, setWrongGuess] = useState(false)
-  const [earnedPts, setEarnedPts] = useState(0)
+function WhoAmIRound({ game, round, roundIndex, total, players, recordRoundScore, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId, auth, room }) {
+  // Новая механика (по запросу):
+  // • Активный игрок (тот, чей ход) угадывает — на его телефоне «Угадал/
+  //   Не угадал» вместо input. Остальные игроки видят персонажа и устно
+  //   отвечают на вопросы.
+  // • Таймер на карточке стартует с получения персонажа, останавливается
+  //   на «Угадал/Не угадал».
+  // • Локально (и через DO) копится суммарное время per-player по всем
+  //   угаданным карточкам — рейтинг строится по wins desc + меньше времени.
+  // • Локальная игра (one-phone): фаза 'setup' (передай телефон) → 'playing'
+  //   (таймер + кнопки у активного) → следующий ход.
   const activePlayer = players[roundIndex % players.length]
-  const isMe = !!myId && String(activePlayer.id) === String(myId)
+  const isMe = !isMultiplayer || (!!myId && String(activePlayer.id) === String(myId))
   const character = round.promptText
-  // В MP мы пропускаем фазу 'setup' (нет необходимости передавать телефон) —
-  // сразу 'playing'. Также активный игрок (isMe) НЕ должен видеть слово.
-  const effectivePhase = isMultiplayer && phase === 'setup' ? 'playing' : phase
+  const [phase, setPhase] = useState(isMultiplayer ? 'playing' : 'setup')
 
-  const handleAnswer = (ans) => {
-    haptic(ans === 'yes' ? 'impact' : 'selection')
-    setQCount(c => c + 1)
-  }
+  // Таймер: startedAt — момент когда фаза стала 'playing'. В mp синкается
+  // через roomRoundState.startedAt, в local — local startedAt.
+  const mpStartedAt = roomRoundState?.startedAt || 0
+  const [localStartedAt, setLocalStartedAt] = useState(0)
+  const startedAt = isMultiplayer ? mpStartedAt : localStartedAt
 
-  // pu_whoami_stats: { [pid]: { name, attempts, wins, totalPts, bestPts } }
-  const bumpWhoAmIStat = (pts) => {
+  // Авто-старт таймера в mp как только активный игрок получил персонажа.
+  useEffect(() => {
+    if (!isMultiplayer) return
+    if (!isMe || !roomId) return
+    if (mpStartedAt) return
+    const ts = Date.now()
+    const next = { startedAt: ts }
+    onRoundStateSync?.(next)
+    fetch(`/api/room/${roomId}/action`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ round: next }) }).catch(() => {})
+  }, [isMultiplayer, isMe, roomId, mpStartedAt, onRoundStateSync, roundIndex])
+
+  // Сброс local state на смене раунда
+  useEffect(() => {
+    setPhase(isMultiplayer ? 'playing' : 'setup')
+    setLocalStartedAt(0)
+  }, [roundIndex, isMultiplayer])
+
+  // Тикаем счётчик для отображения elapsed
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (phase !== 'playing' || !startedAt) return
+    const t = setInterval(() => setNow(Date.now()), 250)
+    return () => clearInterval(t)
+  }, [phase, startedAt])
+  const elapsedMs = startedAt ? Math.max(0, now - startedAt) : 0
+  const elapsedSec = Math.floor(elapsedMs / 1000)
+
+  // Защита от двойного нажатия (network задержка)
+  const whoamiAdvancingRef = useRef(false)
+  useEffect(() => { whoamiAdvancingRef.current = false }, [roundIndex])
+
+  // Локальный pu_whoami_stats (для single-player и fallback'а).
+  const bumpWhoAmIStat = (won, ms) => {
     try {
       const k = 'pu_whoami_stats'
       const all = JSON.parse(localStorage.getItem(k) || '{}')
-      const s = all[activePlayer.id] || { name: activePlayer.name, attempts: 0, wins: 0, totalPts: 0, bestPts: 0 }
+      const s = all[activePlayer.id] || { name: activePlayer.name, attempts: 0, wins: 0, totalMs: 0 }
       s.name = activePlayer.name
       s.attempts += 1
-      s.wins += 1
-      s.totalPts += Number(pts || 0)
-      if (Number(pts || 0) > s.bestPts) s.bestPts = Number(pts)
+      if (won) s.wins += 1
+      s.totalMs += Number(ms || 0)
       all[activePlayer.id] = s
       localStorage.setItem(k, JSON.stringify(all))
     } catch {}
   }
-  const submitGuess = () => {
-    const guess = guessInput.trim().toLowerCase()
-    const target = character.toLowerCase()
-    const correct = guess === target
-      || target.includes(guess)
-      || guess.includes(target.split(' ')[0])
-    if (correct) {
-      haptic('success')
-      const pts = Math.max(1, 10 - Math.floor(qCount / 2))
-      setEarnedPts(pts)
-      recordRoundScore?.({ [activePlayer.id]: pts })
-      bumpWhoAmIStat(pts)
-      setPhase('guessed')
-    } else {
-      haptic('error')
-      setWrongGuess(true)
-      setTimeout(() => setWrongGuess(false), 900)
+
+  const finishTurn = async (won) => {
+    if (whoamiAdvancingRef.current) return
+    whoamiAdvancingRef.current = true
+    haptic(won ? 'success' : 'impact')
+    const ms = elapsedMs
+    if (won) recordRoundScore?.({ [activePlayer.id]: 1 })
+    bumpWhoAmIStat(won, ms)
+    if (isMultiplayer && roomId) {
+      try {
+        await api.roomAction(roomId, {
+          statsDelta: {
+            playerId: activePlayer.id,
+            deltas: {
+              whoami_attempts: 1,
+              ...(won ? { whoami_wins: 1, whoami_time_ms: ms } : {}),
+            },
+            set: { name: activePlayer.name },
+          },
+        })
+      } catch {}
     }
+    onNext()
   }
-
-  const handleGuessedManual = () => {
-    haptic('success')
-    recordRoundScore?.({ [activePlayer.id]: 1 })
-    bumpWhoAmIStat(1)
-    setPhase('guessed')
-  }
-
-  const handleNext = () => { setPhase('setup'); setQCount(0); setGuessInput(''); setEarnedPts(0); setWrongGuess(false); onNext() }
-
-  // ── MP-ветка: спойлер-защита для активного + видимость персонажа другим ─
-  if (isMultiplayer) {
-    return (
-      <div>
-        <RoundHeader game={game} roundIndex={roundIndex} total={total} />
-        <div className="active-player-banner">
-          <PlayerAvatar player={activePlayer} auth={auth} myId={myId} size={48}/>
-          <div>
-            <div className="active-player-name">{activePlayer.name}</div>
-            <div className="active-player-sub">{isMe ? 'твой ход — угадай!' : 'загадан'}</div>
-          </div>
-        </div>
-
-        {effectivePhase !== 'guessed' && !isMe && (
-          <div className="whoami-setup-card">
-            <div className="prompt-type"><Search size={12}/> Персонаж у {activePlayer.name}</div>
-            <div className="whoami-character">{character}</div>
-            <p style={{fontSize:13,color:'var(--muted)',marginTop:12,lineHeight:1.55}}>
-              {activePlayer.name} задаёт вопросы — отвечайте вслух «да» или «нет».
-            </p>
-          </div>
-        )}
-
-        {effectivePhase !== 'guessed' && isMe && (
-          <>
-            <div className="whoami-playing-banner" style={{marginTop:14}}>
-              <div className="prompt-type"><Search size={12}/> Задай вопросы</div>
-              <p style={{margin:'8px 0',color:'var(--muted)',fontSize:13,lineHeight:1.5}}>
-                Узнай, кого тебе загадали. Спрашивай у группы — отвечают «да» или «нет».
-              </p>
-              <p style={{fontSize:13, fontWeight:600}}>Задано вопросов: {qCount}</p>
-            </div>
-            <div className="whoami-guess-row" style={{marginTop:14}}>
-              <input
-                className={`whoami-guess-input ${wrongGuess ? 'wrong' : ''}`}
-                placeholder="Кого тебе загадали?"
-                value={guessInput}
-                onChange={e => setGuessInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && submitGuess()}
-                autoFocus
-              />
-              <button className="whoami-guess-btn" onClick={submitGuess} disabled={!guessInput.trim()}>
-                <Check size={18}/>
-              </button>
-            </div>
-            <button className="btn-ghost mt-12" style={{width:'100%',justifyContent:'center'}}
-              onClick={() => { handleAnswer('yes'); }}>
-              + Задал ещё вопрос
-            </button>
-          </>
-        )}
-
-        {effectivePhase === 'guessed' && (
-          <>
-            <div className="whoami-result-card">
-              <div className="whoami-result-icon">🎉</div>
-              <div className="whoami-result-title">Угадано!</div>
-              <div className="whoami-result-character">{character}</div>
-              <div className="whoami-result-pts">+{earnedPts} {earnedPts === 1 ? 'очко' : 'очка'} → {activePlayer.name}</div>
-            </div>
-            <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
-          </>
-        )}
-      </div>
-    )
-  }
-  // ── Local-ветка: pass-and-play (старая логика) ─────────────────────────
 
   return (
     <div>
       <RoundHeader game={game} roundIndex={roundIndex} total={total} />
+      <div className="active-player-banner">
+        <PlayerAvatar player={activePlayer} auth={auth} myId={myId} size={48}/>
+        <div>
+          <div className="active-player-name">{activePlayer.name}</div>
+          <div className="active-player-sub">{isMe ? 'твой ход — угадай!' : 'угадывает'}</div>
+        </div>
+      </div>
 
-      {phase === 'setup' && (
+      {/* Краткое объяснение */}
+      <div className="prompt-card" style={{textAlign:'left', padding: '12px 14px', marginTop: 12}}>
+        <div className="prompt-type"><Search size={12}/> Как играть</div>
+        <p style={{fontSize:13, color:'var(--muted)', margin:'6px 0 0', lineHeight:1.5}}>
+          {isMe
+            ? 'Спрашивай у группы любые вопросы — отвечают «да» или «нет». Как только догадался — жми «Угадал». Сдался — «Не угадал». Таймер уже идёт.'
+            : 'Помогай отвечать на вопросы — только «да» или «нет». Слово показано ниже.'}
+        </p>
+      </div>
+
+      {/* В single-player pass-and-play: setup → передать телефон. */}
+      {!isMultiplayer && phase === 'setup' && (
         <>
           <div className="whoami-setup-card">
-            <div className="prompt-type"><Search size={12}/> Персонаж для {activePlayer.name}</div>
+            <div className="prompt-type"><Eye size={12}/> Покажи всем, кроме {activePlayer.name}</div>
             <div className="whoami-character">{character}</div>
             <p style={{fontSize:13,color:'var(--muted)',marginTop:12,lineHeight:1.55}}>
-              Покажи всем, кроме <strong>{activePlayer.name}</strong>.<br/>
-              Потом передай телефон.
+              Покажи всем, кроме <strong>{activePlayer.name}</strong>. Потом передай телефон ему — он будет угадывать.
             </p>
           </div>
-          <button className="btn-primary mt-16" onClick={() => setPhase('playing')}>
-            <Eye size={17}/> {activePlayer.name} готов(а)
+          <button className="btn-primary mt-16" onClick={() => {
+            setPhase('playing')
+            setLocalStartedAt(Date.now())
+          }}>
+            <Eye size={17}/> {activePlayer.name} готов(а) — старт
           </button>
         </>
       )}
 
       {phase === 'playing' && (
         <>
-          <div className="whoami-playing-banner">
-            <span>{activePlayer.emoji}</span>
-            <div>
-              <strong>{activePlayer.name}</strong>
-              <span>задаёт вопросы</span>
+          {/* Карточка с таймером — у активного: только таймер, у остальных: персонаж */}
+          {isMe ? (
+            <div className="whoami-setup-card" style={{textAlign:'center'}}>
+              <div className="prompt-type"><Timer size={12}/> Таймер</div>
+              <div style={{fontSize:56, fontWeight:800, marginTop:8, fontVariantNumeric:'tabular-nums'}}>
+                {elapsedSec}
+                <span style={{fontSize:18, color:'var(--muted)', marginLeft:6}}>сек</span>
+              </div>
+              <p style={{fontSize:13,color:'var(--muted)',marginTop:8,lineHeight:1.4}}>
+                Чем быстрее угадаешь — тем выше место в рейтинге.
+              </p>
             </div>
-            <div className="whoami-q-count">{qCount} вопр.</div>
-          </div>
-
-          <div className="prompt-card" style={{textAlign:'center'}}>
-            <div className="prompt-type"><Search size={12}/> Кто ты?</div>
-            <div className="prompt-text" style={{fontSize:17}}>Задавай вопросы — только «Да» или «Нет»</div>
-            <div style={{fontSize:13,color:'var(--muted)',marginTop:10}}>Уже задано: {qCount} вопросов</div>
-          </div>
-
-          <div className="whoami-answer-row">
-            <button className="whoami-btn-yes" onClick={() => handleAnswer('yes')}><Check size={22}/> Да</button>
-            <button className="whoami-btn-no" onClick={() => handleAnswer('no')}><X size={22}/> Нет</button>
-          </div>
-
-          <div className={`whoami-guess-row ${wrongGuess ? 'wrong-shake' : ''}`}>
-            <input
-              className="whoami-guess-input"
-              placeholder="Введи догадку…"
-              value={guessInput}
-              onChange={e => setGuessInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && submitGuess()}
-            />
-            <button className="whoami-guess-btn" onClick={submitGuess} disabled={!guessInput.trim()}>
-              <CircleCheck size={18}/>
-            </button>
-          </div>
-
-          <button className="btn-ghost mt-10" style={{width:'100%',justifyContent:'center',fontSize:13}}
-            onClick={handleGuessedManual}>
-            <CircleCheck size={14}/> Угадал(а) устно — засчитать очко
-          </button>
-          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
-        </>
-      )}
-
-      {phase === 'guessed' && (
-        <>
-          <div className="whoami-guessed-card">
-            <div className="whoami-guessed-icon">🎉</div>
-            <div className="whoami-guessed-name">{character}</div>
-            <div style={{fontSize:13,color:'var(--muted)',marginTop:6}}>
-              За {qCount} вопросов · +{earnedPts} {earnedPts === 1 ? 'очко' : 'очков'}
+          ) : (
+            <div className="whoami-setup-card">
+              <div className="prompt-type"><Search size={12}/> Загадано {activePlayer.name}</div>
+              <div className="whoami-character">{character}</div>
+              <p style={{fontSize:13,color:'var(--muted)',marginTop:12,lineHeight:1.55}}>
+                Отвечайте «да» или «нет» на вопросы.
+              </p>
+              <div style={{marginTop:10, fontSize:12, color:'var(--muted)'}}>
+                Таймер: {elapsedSec} сек
+              </div>
             </div>
-          </div>
-          <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+          )}
+
+          {/* Кнопки только у активного игрока (на чьём ходу). */}
+          {isMe && (
+            <div className="five-result-btns" style={{marginTop:18}}>
+              <button className="five-btn-success" onClick={() => finishTurn(true)}>
+                <Check size={20}/> Угадал
+              </button>
+              <button className="five-btn-fail" onClick={() => finishTurn(false)}>
+                <X size={20}/> Не угадал
+              </button>
+            </div>
+          )}
+          {!isMe && (
+            <div className="mp-waiting-hint mt-16">
+              <Clock size={14}/> {activePlayer.name} угадывает…
+            </div>
+          )}
         </>
       )}
     </div>
@@ -5509,14 +5477,22 @@ function MemeBattleRound({ game, round, roundIndex, total, players, onNext, onEn
 /* ─── WouldRatherRound ─────────────────────────────────────────────────────
    Карточка с дилеммой А || Б. Игрок голосует, открывается статистика
    (% выборов на сервере), затем «Следующий» передаёт ход. */
-function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic }) {
+function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, roomRoundState, onRoundStateSync, myId }) {
   const activePlayer = players[roundIndex % players.length]
-  const [picked, setPicked] = useState(null) // 'A' | 'B' | null
-  const [stats, setStats] = useState(null)   // { a, b }
+  // В mp каждый голосует своим телефоном (votes в roomRoundState).
+  // В local — один игрок выбирает за себя, по очереди.
+  const mpVotes = roomRoundState?.votes || {}
+  const myMpVote = myId ? mpVotes[myId] : null
+  const everyoneVoted = isMultiplayer
+    ? (players.length > 0 && players.every(p => mpVotes[p.id]))
+    : false
+
+  const [localPicked, setLocalPicked] = useState(null)   // 'A' | 'B'
+  const picked = isMultiplayer ? myMpVote : localPicked
   const [voting, setVoting] = useState(false)
 
-  // Reset on prompt change
-  useEffect(() => { setPicked(null); setStats(null); setVoting(false) }, [round.id])
+  // Reset on prompt change (только local, для mp roomRoundState даёт reset)
+  useEffect(() => { setLocalPicked(null); setVoting(false) }, [round.id, roundIndex])
 
   // Parse "A||B" into two halves
   const raw = String(round.promptText || '')
@@ -5524,52 +5500,129 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
   const [optA, optB] = raw.split(sep).map(s => s.trim())
   const cardId = round.promptData?.id ?? null
 
+  // Stats показываем ТОЛЬКО когда все проголосовали (иначе считается неверно).
+  const counts = isMultiplayer
+    ? {
+        a: Object.values(mpVotes).filter(v => v === 'A').length,
+        b: Object.values(mpVotes).filter(v => v === 'B').length,
+      }
+    : (picked ? { a: picked === 'A' ? 1 : 0, b: picked === 'B' ? 1 : 0 } : { a: 0, b: 0 })
+  const showStats = isMultiplayer ? everyoneVoted : !!picked
+  const total_votes = counts.a + counts.b
+  const pctA = total_votes > 0 ? Math.round((counts.a / total_votes) * 100) : 0
+  const pctB = total_votes > 0 ? 100 - pctA : 0
+
   const vote = async (choice) => {
     if (picked || voting) return
-    setPicked(choice); setVoting(true); haptic('impact')
-    // pu_wr_stats: { [pid]: { name, picksA, picksB, majority, total } }
-    // majority = сколько раз игрок выбирал «как большинство»; для финиш-экрана
-    // даёт ачивку «Думает как все» / «Идёт против течения».
+    if (isMultiplayer && !myId) return
+    setVoting(true); haptic('impact')
+
+    if (isMultiplayer && roomId) {
+      // Оптимистично кладём свой голос + отправляем на сервер.
+      // Server merges votes (см. worker.js /action) — голоса не теряются.
+      const next = { votes: { ...mpVotes, [myId]: choice }, pickedAt: Date.now() }
+      onRoundStateSync?.(next)
+      try {
+        await fetch(`/api/room/${roomId}/action`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ round: next }),
+        })
+      } catch {}
+    } else {
+      setLocalPicked(choice)
+    }
+
+    // Глобальная статистика карточки в БД (только если есть cardId).
+    if (cardId) {
+      try {
+        await fetch('/api/wr/vote', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ card_id: cardId, choice }),
+        })
+      } catch {}
+    }
+    setVoting(false); haptic('success')
+  }
+
+  // Per-client commit статистики (majority/minority) когда все проголосовали.
+  const wrCommittedRef = useRef(new Set())
+  useEffect(() => {
+    if (!isMultiplayer) return
+    if (!everyoneVoted) return
+    if (wrCommittedRef.current.has(roundIndex)) return
+    wrCommittedRef.current.add(roundIndex)
+    const majSide = counts.a >= counts.b ? 'A' : 'B'
+    const minSide = majSide === 'A' ? 'B' : 'A'
+    // Local pu_wr_stats — для fallback.
     try {
       const k = 'pu_wr_stats'
       const all = JSON.parse(localStorage.getItem(k) || '{}')
-      const s = all[activePlayer.id] || { name: activePlayer.name, picksA: 0, picksB: 0, majority: 0, total: 0 }
+      for (const p of players) {
+        const v = mpVotes[p.id]
+        if (!v) continue
+        const s = all[p.id] || { name: p.name, picksA: 0, picksB: 0, majority: 0, minority: 0, total: 0 }
+        s.name = p.name
+        s.total += 1
+        if (v === 'A') s.picksA += 1; else s.picksB += 1
+        if (counts.a !== counts.b) {
+          if (v === majSide) s.majority += 1
+          else s.minority += 1
+        }
+        all[p.id] = s
+      }
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
+    // Server-side statsDelta — отправляем с одного клиента (хост) для
+    // дедупликации. Гости в mp читают room.stats через polling.
+    if (isHost && roomId) {
+      ;(async () => {
+        for (const p of players) {
+          const v = mpVotes[p.id]
+          if (!v) continue
+          const deltas = { wr_total: 1 }
+          if (counts.a !== counts.b) {
+            if (v === majSide) deltas.wr_majority = 1
+            else deltas.wr_minority = 1
+          }
+          try {
+            await api.roomAction(roomId, {
+              statsDelta: { playerId: p.id, deltas, set: { name: p.name } },
+            })
+          } catch {}
+        }
+      })()
+    }
+  }, [everyoneVoted, roundIndex, isMultiplayer, isHost, roomId, players, mpVotes, counts.a, counts.b])
+
+  // Локальный commit для single-player (на каждом vote).
+  useEffect(() => {
+    if (isMultiplayer || !picked) return
+    try {
+      const k = 'pu_wr_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const s = all[activePlayer.id] || { name: activePlayer.name, picksA: 0, picksB: 0, majority: 0, minority: 0, total: 0 }
       s.name = activePlayer.name
-      s.total += 1
-      if (choice === 'A') s.picksA += 1; else s.picksB += 1
-      const baseA0 = Number(round.promptData?.wr_a || 0)
-      const baseB0 = Number(round.promptData?.wr_b || 0)
-      if (baseA0 + baseB0 > 0) {
-        const majSide = baseA0 >= baseB0 ? 'A' : 'B'
-        if (majSide === choice) s.majority += 1
+      // Не дублируем — пишем только при первом pick этого раунда.
+      const sig = `${roundIndex}|${picked}`
+      if (s._lastSig !== sig) {
+        s._lastSig = sig
+        s.total += 1
+        if (picked === 'A') s.picksA += 1; else s.picksB += 1
+        const baseA0 = Number(round.promptData?.wr_a || 0)
+        const baseB0 = Number(round.promptData?.wr_b || 0)
+        if (baseA0 + baseB0 > 0) {
+          const majSide = baseA0 >= baseB0 ? 'A' : 'B'
+          if (majSide === picked) s.majority += 1
+          else s.minority += 1
+        }
       }
       all[activePlayer.id] = s
       localStorage.setItem(k, JSON.stringify(all))
     } catch {}
-    // Базовые цифры из карточки (если уже есть голоса) + наш голос локально
-    const baseA = Number(round.promptData?.wr_a || 0)
-    const baseB = Number(round.promptData?.wr_b || 0)
-    let a = baseA + (choice === 'A' ? 1 : 0)
-    let b = baseB + (choice === 'B' ? 1 : 0)
-    if (cardId) {
-      try {
-        const r = await fetch('/api/wr/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ card_id: cardId, choice }),
-        })
-        const d = await r.json().catch(() => ({}))
-        if (r.ok && d?.ok) { a = Number(d.wr_a || a); b = Number(d.wr_b || b) }
-      } catch {}
-    }
-    setStats({ a, b }); setVoting(false); haptic('success')
-  }
+  }, [isMultiplayer, picked, activePlayer, round, roundIndex])
 
-  const handleNext = () => { setPicked(null); setStats(null); onNext() }
-
-  const total_votes = stats ? (stats.a + stats.b) : 0
-  const pctA = total_votes > 0 ? Math.round((stats.a / total_votes) * 100) : 0
-  const pctB = total_votes > 0 ? 100 - pctA : 0
+  const handleNext = () => { setLocalPicked(null); onNext() }
+  const isLastRound = roundIndex >= total - 1
 
   return (
     <div>
@@ -5589,7 +5642,7 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
         >
           <div className="wr-letter">А</div>
           <div className="wr-text">{optA || '—'}</div>
-          {stats && (
+          {showStats && (
             <div className="wr-bar-wrap">
               <div className="wr-bar wr-bar-a" style={{ width: pctA + '%' }} />
               <span className="wr-pct">{pctA}%</span>
@@ -5605,7 +5658,7 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
         >
           <div className="wr-letter">Б</div>
           <div className="wr-text">{optB || '—'}</div>
-          {stats && (
+          {showStats && (
             <div className="wr-bar-wrap">
               <div className="wr-bar wr-bar-b" style={{ width: pctB + '%' }} />
               <span className="wr-pct">{pctB}%</span>
@@ -5614,7 +5667,19 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
         </button>
       </div>
 
-      {stats && (
+      {/* В mp пока ждём остальных — показываем прогресс, без статистики. */}
+      {isMultiplayer && !showStats && picked && (
+        <div className="never-progress" style={{marginTop: 14, textAlign:'center'}}>
+          {Object.keys(mpVotes).length} из {players.length} проголосовали
+        </div>
+      )}
+      {isMultiplayer && !showStats && !picked && (
+        <div className="never-progress" style={{marginTop: 14, textAlign:'center', color: 'var(--muted)'}}>
+          Сделай свой выбор — статистика появится, когда все проголосуют
+        </div>
+      )}
+
+      {showStats && (
         <div className="wr-comment">
           {pctA === pctB
             ? <>🤝 Поровну. Кто-то должен объяснить свой выбор!</>
@@ -5625,8 +5690,14 @@ function WouldRatherRound({ game, round, roundIndex, total, players, onNext, onE
         </div>
       )}
 
-      {stats && (
-        <NextRoundBtn roundIndex={roundIndex} total={total} onNext={handleNext} onEnd={onEnd}/>
+      {/* «Следующий/Итоги» доступны ВСЕМ участникам после голосования
+          (раньше через NextRoundBtn только хост). */}
+      {showStats && (
+        <button
+          className="btn-primary no-pulse mt-16"
+          onClick={isLastRound ? onEnd : handleNext}>
+          {isLastRound ? <><Trophy size={17}/> Итоги</> : <><ChevronRight size={17}/> Следующий</>}
+        </button>
       )}
     </div>
   )
@@ -6111,7 +6182,15 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
     : {}
   const matchCount = Object.values(matchGroups).filter(c => c > 1).reduce((s, c) => s + c, 0)
 
+  // Защита от двойного nextRound и от мерцания при «Следующий»: blockingRef
+  // не даёт повторно advance, плюс onNext происходит сразу — App.nextRound
+  // дёргает roomRoundState(null) одновременно со сменой roundIndex.
+  const assocAdvancingRef = useRef(false)
+  useEffect(() => { assocAdvancingRef.current = false }, [roundIndex])
+
   const handleNext = async () => {
+    if (assocAdvancingRef.current) return
+    assocAdvancingRef.current = true
     // Скоринг + ачивки: за каждое совпадение по +1 балл всем участникам группы
     const matchedScores = {}
     for (const p of players) {
@@ -6129,9 +6208,28 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
       }
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
-    // App.nextRound сам обнулит roomRoundState при смене roundIndex.
+    // Server-side stats (для финиш-экрана у всех клиентов).
+    if (roomId) {
+      try {
+        // batch — отправляем все деление в одном POST'е (одна запись на player)
+        for (const [pid, pts] of Object.entries(matchedScores)) {
+          const player = players.find(p => String(p.id) === String(pid))
+          await api.roomAction(roomId, {
+            statsDelta: {
+              playerId: pid,
+              deltas: { assoc_matches: Number(pts) },
+              set: { name: player?.name || '' },
+            },
+          })
+        }
+      } catch {}
+    }
     onNext()
   }
+
+  // ScrollIntoView для input — клавиатура на мобиле часто закрывает поле,
+  // через 350мс после focus подскролливаем input в видимую область.
+  const assocInputRef = useRef(null)
 
   return (
     <div>
@@ -6152,11 +6250,18 @@ function AssociationsMP({ game, round, roundIndex, total, players, recordRoundSc
           ) : (
             <div className="whoami-guess-row" style={{marginTop:14}}>
               <input
+                ref={assocInputRef}
                 className="whoami-guess-input"
                 placeholder="Твоя ассоциация…"
                 value={draft}
                 onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && submit()}
+                onFocus={(e) => {
+                  const el = e.currentTarget
+                  setTimeout(() => {
+                    try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch {}
+                  }, 350)
+                }}
                 autoFocus
                 maxLength={40}
               />
@@ -6311,6 +6416,12 @@ function AssociationsLocal({ game, round, roundIndex, total, players, recordRoun
               value={currentInput}
               onChange={e => setCurrentInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && submitAssociation()}
+              onFocus={(e) => {
+                const el = e.currentTarget
+                setTimeout(() => {
+                  try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch {}
+                }, 350)
+              }}
               autoFocus
             />
             <button className="whoami-guess-btn" onClick={submitAssociation} disabled={!currentInput.trim()}>
