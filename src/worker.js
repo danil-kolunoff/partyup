@@ -1042,8 +1042,24 @@ export class GameRoom {
       }
       // Per-round state (выбор «Правда/Действие», открытая карточка и т.д.)
       // Используется для синхронизации действий хода между игроками.
+      // ВАЖНО: для полей-словарей (votes, answers, score-deltas) делаем MERGE,
+      // а не replace. Иначе два игрока, голосующие одновременно на основе
+      // локально устаревшей картинки votes, перезаписывают друг друга —
+      // у первого «голос пропадает» и появляются кнопки выбора снова.
       if (body.round !== undefined) {
-        room.round = body.round; // null → сброс, { choice, promptText, ... } → новое состояние
+        if (body.round === null) {
+          room.round = null;
+        } else {
+          const cur = room.round || {};
+          const incoming = { ...body.round };
+          if (incoming.votes && typeof incoming.votes === 'object') {
+            incoming.votes = { ...(cur.votes || {}), ...incoming.votes };
+          }
+          if (incoming.answers && typeof incoming.answers === 'object') {
+            incoming.answers = { ...(cur.answers || {}), ...incoming.answers };
+          }
+          room.round = incoming;
+        }
       }
       // Хост поменял настройки (rounds/vibe) — патчим room.settings и
       // увеличиваем version, гости подтянут через poll.
@@ -1061,6 +1077,33 @@ export class GameRoom {
       // одну и ту же карточку по индексу — гарантия синхрона + refresh-safe.
       if (Array.isArray(body.deck)) {
         room.deck = body.deck;
+      }
+      // Per-game accumulated stats: { [pid]: { ...counters } }. Любой клиент
+      // может прислать дельту через POST /action { statsDelta: { playerId, deltas } }.
+      // Сервер мерджит — это даёт SINGLE SOURCE OF TRUTH для финиш-экрана,
+      // у всех игроков одинаковая статистика независимо от того, кто и
+      // когда нажимал «Угадали/Не угадали/Голос/etc.».
+      if (body.statsDelta && typeof body.statsDelta === 'object') {
+        const sd = body.statsDelta;
+        const pid = String(sd.playerId || '');
+        const deltas = sd.deltas || {};
+        const setters = sd.set || {};
+        if (pid) {
+          if (!room.stats) room.stats = {};
+          if (!room.stats[pid]) room.stats[pid] = {};
+          for (const [k, v] of Object.entries(deltas)) {
+            const cur = Number(room.stats[pid][k] || 0);
+            room.stats[pid][k] = cur + Number(v || 0);
+          }
+          // setters — для полей которые перезаписываем целиком (например name).
+          for (const [k, v] of Object.entries(setters)) {
+            room.stats[pid][k] = v;
+          }
+        }
+      }
+      // Сброс stats — при старте новой партии. Клиент шлёт statsReset: true.
+      if (body.statsReset) {
+        room.stats = {};
       }
       // Замер времени активного хода — фиксируем «когда игрок начал свой ход».
       // Клиент посылает duration (ms) при завершении хода — суммируем в плеер.

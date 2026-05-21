@@ -861,9 +861,11 @@ export default function App() {
         const deck = buildDeck()
         await fetch(`/api/room/${roomId}/action`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deck, state: 'playing', roundIndex: 0 }),
+          // statsReset:true одновременно с deck — обнуляем server-aggregated
+          // stats предыдущей партии, чтобы на финиш-экране была чистая статистика.
+          body: JSON.stringify({ deck, state: 'playing', roundIndex: 0, statsReset: true }),
         })
-        setRoom(r => r ? { ...r, deck, state: 'playing' } : r)
+        setRoom(r => r ? { ...r, deck, state: 'playing', stats: {} } : r)
       } catch (e) { console.error('Deck publish failed', e) }
     } else if (!isMultiplayer) {
       // Single-player: каждый запуск — свежий перетасованный deck,
@@ -1213,8 +1215,8 @@ export default function App() {
             haptic={haptic}
             isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
             onRoomPlayersUpdate={(srv) => setRoom(r => r
-              ? { ...r, players: srv.players, hostId: srv.hostId, gameId: srv.gameId, settings: srv.settings, deck: srv.deck, state: srv.state }
-              : { id: srv.id, players: srv.players, hostId: srv.hostId, gameId: srv.gameId, settings: srv.settings, deck: srv.deck, state: srv.state }
+              ? { ...r, players: srv.players, hostId: srv.hostId, gameId: srv.gameId, settings: srv.settings, deck: srv.deck, state: srv.state, stats: srv.stats }
+              : { id: srv.id, players: srv.players, hostId: srv.hostId, gameId: srv.gameId, settings: srv.settings, deck: srv.deck, state: srv.state, stats: srv.stats }
             )}
             onGameStartedByHost={() => { startRound() }}
             onLeaveLobby={() => {
@@ -1241,20 +1243,25 @@ export default function App() {
             onNext={nextRound} onEnd={endGame} haptic={haptic}
             isMultiplayer={isMultiplayer} isHost={isHost} roomId={roomId}
             onRoundSync={(idx) => { setRoundIndex(idx); setRoomRoundState(null) }}
+            onRoomStatsSync={(s) => setRoom(r => r ? { ...r, stats: s } : r)}
             onRoundStateSync={(rs) => setRoomRoundState(prev => {
               // Dedupe по полной JSON-сигнатуре (учитывает votes для NeverHaveI).
               const a = prev ? JSON.stringify(prev) : 'null'
               const b = rs ? JSON.stringify(rs) : 'null'
               if (a === b) return prev
               // Защита от мерцания: если polling вернул null, а у нас локально
-              // есть state — это типичная гонка «optimistic update vs polling»
-              // (нажали Правда → optimistic local set → polling успел сходить
-              // на сервер ДО того, как там сохранился наш round → возвращает
-              // null → мы стираем optimistic → кнопки выбора моргают).
-              // НИКТО уже не отправляет round=null отдельным запросом (DO сам
-              // сбрасывает round при смене roundIndex, а это идёт другим path —
-              // onRoundSync). Поэтому такой null от polling всегда устаревший.
+              // есть state — устаревший ответ. Сервер сам обнуляет round
+              // только при смене roundIndex (тот идёт другим path).
               if (rs == null && prev != null) return prev
+              // Защита от устаревшего polling-голосования: если новое votes/
+              // answers имеет МЕНЬШЕ ключей чем prev — это значит polling
+              // вернул прежний снапшот, у которого ещё не было наших оптимистик-
+              // дельт. Не откатываем счёт назад.
+              const cntKeys = (o) => (o && typeof o === 'object') ? Object.keys(o).length : 0
+              if (prev && rs) {
+                if (cntKeys(rs.votes) < cntKeys(prev.votes)) return prev
+                if (cntKeys(rs.answers) < cntKeys(prev.answers)) return prev
+              }
               return rs
             })}
             roomRoundState={roomRoundState}
@@ -1290,6 +1297,8 @@ export default function App() {
             isHost={isHost}
             roomId={roomId}
             myId={myPlayerId}
+            roomStats={room?.stats || null}
+            onRoomStatsSync={(s) => setRoom(r => r ? { ...r, stats: s } : r)}
             onHostNavigated={(serverState) => {
               if (serverState === 'lobby') { setRoundIndex(0); setScores({}); setRoomRoundState(null); navigate(SCREENS.LOBBY) }
               else if (serverState === 'playing') { setRoundIndex(0); setRoomRoundState(null); navigate(SCREENS.ROUND) }
@@ -1399,10 +1408,12 @@ export default function App() {
           сработает даже если попытаться поменять через другую точку входа
           (vibe-chip на главной, slider в PickerScreen и т.д.). */}
       {(() => {
-        const vibeLocked = (isMultiplayer && roomId != null)
-          || screen === SCREENS.LOBBY
-          || screen === SCREENS.ROUND
-          || screen === SCREENS.RESULTS
+        // vibeLocked только когда партия УЖЕ идёт: ROUND, RESULTS, или
+        // лобби с state='playing' (кто-то ходит, кто-то вернулся). В лобби
+        // со state='lobby' (готовимся к игре) — хост может менять вайб.
+        const inActiveGame = screen === SCREENS.ROUND || screen === SCREENS.RESULTS
+        const lobbyWithLiveGame = (screen === SCREENS.LOBBY) && (room?.state === 'playing')
+        const vibeLocked = inActiveGame || lobbyWithLiveGame
         vibeLockedRef.current = vibeLocked
         return <>
           <BottomNav
@@ -1484,10 +1495,10 @@ const GAME_LOBBY_SCHEMA = {
   truth:        [['rounds', 'Карточек в партии', [25, 50, 100]]],
   never:        [['rounds', 'Вопросов', [6, 10, 16, 24]]],
   whoofus:      [['rounds', 'Голосований', [5, 8, 12, 16]]],
-  five:         [['rounds', 'Раундов', [5, 8, 12]], ['timer', 'Секунд на ответ', [5, 7, 10]]],
+  five:         [['rounds', 'Раундов', [5, 8, 12]]],
   crocodile:    [['rounds', 'Карточек в партии', [25, 50, 100]], ['timer', 'Секунд на показ', [30, 60, 90]]],
   alias:        [['rounds', 'Кол-во раундов', [5, 10, 15]], ['timer', 'Секунд на ход', [30, 45, 60]]],
-  whoami:       [['rounds', 'Персонажей на игрока', [1, 2, 3]]],
+  whoami:       [['rounds', 'Персонажей на игрока', [5, 10, 15]]],
   associations: [['rounds', 'Слов в цепочке', [5, 8, 12, 16]]],
   would_rather: [['rounds', 'Дилемм в партии', [10, 15, 25, 40]]],
 }
@@ -3420,18 +3431,23 @@ function LobbyScreen({ game, players, room, settings, setSettings, showWarmupHin
       {(!isMultiplayer || isHost) ? (
         <div className="lobby-axis-stack">
           <div className="setup-axis-card">
-            {/* Вайб в лобби фиксирован (выбирается ДО создания комнаты на главной/
-                в picker'е). Кнопка disabled без отдельного индикатора-замочка. */}
+            {/* В лобби (state='lobby') хост может менять вайб. Когда партия
+                запущена (state='playing') — блокируется, потому что deck
+                зафиксирован и любая смена ведёт к рассинхрону. */}
             <button
-              className="setup-axis-row is-locked"
-              disabled
-              aria-disabled="true"
+              className={`setup-axis-row ${room?.state === 'playing' ? 'is-locked' : ''}`}
+              onClick={() => {
+                if (room?.state === 'playing') return
+                setShowVibe(true)
+              }}
+              disabled={room?.state === 'playing'}
             >
               <div className="setup-axis-key">
                 <VibeIcon vibeId={currentVibe} size={16}/> Вайб
               </div>
               <div className="setup-axis-val">
                 {VIBES.find(v => v.id === currentVibe)?.label || 'Разогрев'}
+                {room?.state !== 'playing' && <ChevronRight size={14}/>}
               </div>
             </button>
           </div>
@@ -3599,7 +3615,7 @@ function NextRoundBtn({ roundIndex, total, onNext, onEnd, isMultiplayer, isHost 
 }
 
 /* ─── RoundScreen dispatcher ─────────────────────────────────────────────── */
-function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby, settings }) {
+function RoundScreen({ game, round, roundIndex, total, players, scores, recordRoundScore, recordActiveMs, onNext, onEnd, haptic, isMultiplayer, isHost, roomId, onRoundSync, onGameEnded, auth, onAvatarClick, roomRoundState, onRoundStateSync, myId, onExitGame, onForceLobby, settings, onRoomStatsSync }) {
   // Мультиплеер-поллинг (адаптивный):
   // • если игрок в комнате один — поллинг не нужен (некому что-то менять);
   // • вкладка скрыта — пауза;
@@ -3623,6 +3639,9 @@ function RoundScreen({ game, round, roundIndex, total, players, scores, recordRo
         if (!res.ok) { schedule(); return }
         const et = res.headers.get('etag'); if (et) lastEtag = et
         const serverRoom = await res.json()
+        // Подтягиваем server-aggregated stats — чтобы на финиш-экране у всех
+        // была одинаковая статистика (а не «у себя — есть, у других — 0»).
+        if (serverRoom.stats && onRoomStatsSync) onRoomStatsSync(serverRoom.stats)
         if (serverRoom.state === 'ended') { onGameEnded?.(); return }
         if (serverRoom.roundIndex > roundIndex) { onRoundSync?.(serverRoom.roundIndex); return }
         if (serverRoom.roundIndex < roundIndex) { schedule(); return }
@@ -3755,6 +3774,32 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
     return pool[bag.pop()]
   }
 
+  // ── Per-client commit pu_truth_stats для MP ───────────────────────────
+  // Раньше запись делал только активный игрок (в pick), поэтому у гостей на
+  // финиш-экране у других игроков было 0. Теперь каждый клиент фиксирует
+  // у себя choice (truth/dare), как только видит его в roomRoundState —
+  // committedRef защищает от двойного коммита на один раунд.
+  const truthCommittedRef = useRef(new Set())
+  useEffect(() => {
+    if (!isMultiplayer) return
+    const rs = roomRoundState
+    if (!rs?.choice || !rs?.pickedBy) return
+    if (truthCommittedRef.current.has(roundIndex)) return
+    truthCommittedRef.current.add(roundIndex)
+    try {
+      const k = 'pu_truth_stats'
+      const all = JSON.parse(localStorage.getItem(k) || '{}')
+      const pl = players.find(p => String(p.id) === String(rs.pickedBy))
+      const pname = pl?.name || `Игрок`
+      const s = all[rs.pickedBy] || { name: pname, truths: 0, dares: 0 }
+      s.name = pname
+      if (rs.choice === 'truth') s.truths += 1
+      else if (rs.choice === 'dare') s.dares += 1
+      all[rs.pickedBy] = s
+      localStorage.setItem(k, JSON.stringify(all))
+    } catch {}
+  }, [roomRoundState?.choice, roomRoundState?.pickedBy, roundIndex, isMultiplayer, players])
+
   // ── Выбор Правда/Действие ──
   const pick = async (type) => {
     if (!isMyTurn || busy || choice) return
@@ -3762,18 +3807,20 @@ function TruthOrDareRound({ game, round, roundIndex, total, players, onNext, onE
     if (!pool.length) return
     const p = drawFromBag(type) || pool[Math.floor(Math.random() * pool.length)]
     haptic('impact')
-    // pu_truth_stats: { [pid]: { name, truths, dares } } — для рейтинга на финише.
-    // Параметр «смелость» = больше Действий; «открытость» = больше Правд; ничья = баланс.
-    try {
-      const k = 'pu_truth_stats'
-      const all = JSON.parse(localStorage.getItem(k) || '{}')
-      const s = all[activePlayer.id] || { name: activePlayer.name, truths: 0, dares: 0 }
-      s.name = activePlayer.name
-      if (type === 'truth') s.truths += 1
-      else s.dares += 1
-      all[activePlayer.id] = s
-      localStorage.setItem(k, JSON.stringify(all))
-    } catch {}
+    // pu_truth_stats: пишем здесь ТОЛЬКО для single-player.
+    // В mp pu_truth_stats пишет useEffect выше — у каждого клиента независимо.
+    if (!isMultiplayer) {
+      try {
+        const k = 'pu_truth_stats'
+        const all = JSON.parse(localStorage.getItem(k) || '{}')
+        const s = all[activePlayer.id] || { name: activePlayer.name, truths: 0, dares: 0 }
+        s.name = activePlayer.name
+        if (type === 'truth') s.truths += 1
+        else s.dares += 1
+        all[activePlayer.id] = s
+        localStorage.setItem(k, JSON.stringify(all))
+      } catch {}
+    }
     if (isMultiplayer && roomId) {
       const optimistic = {
         choice: type,
@@ -4311,10 +4358,17 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
   const elapsed = startedAt ? Math.max(0, (now - startedAt) / 1000) : 0
   const count = Math.max(0, Math.ceil(5 - elapsed))
 
-  // Авто-переход countdown → done когда время вышло
+  // Авто-переход countdown → done когда время вышло.
+  // doneFiredRef — защита от повторных haptic + повторного POST: useEffect
+  // re-fires пока polling не подгонит сервер (phase ещё 'countdown'),
+  // и вибрация бьётся 3-5 раз подряд, а fetch отправляется лишних раз.
+  const doneFiredRef = useRef(false)
+  useEffect(() => { if (phase !== 'countdown') doneFiredRef.current = false }, [phase])
+  useEffect(() => { doneFiredRef.current = false }, [roundIndex])
   useEffect(() => {
-    if (phase !== 'countdown' || !startedAt) return
+    if (phase !== 'countdown' || !startedAt || doneFiredRef.current) return
     if (elapsed >= 5) {
+      doneFiredRef.current = true
       if (isMultiplayer && isMyTurn && roomId) {
         const next = { phase: 'done', startedAt }
         onRoundStateSync?.(next)
@@ -4325,7 +4379,7 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
       } else if (!isMultiplayer) {
         setLocalPhase('done')
       }
-      haptic?.('success')
+      haptic?.('warning')
     }
   }, [elapsed, phase, startedAt, isMultiplayer, isMyTurn, roomId, onRoundStateSync, haptic])
 
@@ -4345,35 +4399,50 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
   }
 
   const recordResult = (success) => {
-    // Записываем в локальный per-game-аккумулятор для ачивок
+    // Локальная статистика (для single-player). В mp используется server-side
+    // room.stats (см. statsDelta ниже), который получают все клиенты через
+    // polling — финиш-экран показывает одинаковую статистику всем.
     try {
       const k = 'pu_five_stats'
       const prev = JSON.parse(localStorage.getItem(k) || '{}')
-      prev[activePlayer.id] = prev[activePlayer.id] || { success: 0, fail: 0 }
+      prev[activePlayer.id] = prev[activePlayer.id] || { success: 0, fail: 0, name: activePlayer.name }
       if (success) prev[activePlayer.id].success += 1
       else prev[activePlayer.id].fail += 1
+      prev[activePlayer.id].name = activePlayer.name
       localStorage.setItem(k, JSON.stringify(prev))
     } catch {}
   }
 
+  // Защита от двойного нажатия Успел/Не успел
+  const fiveAdvancingRef = useRef(false)
+  useEffect(() => { fiveAdvancingRef.current = false }, [roundIndex])
+
   const handleSuccess = async () => {
+    if (fiveAdvancingRef.current) return
+    fiveAdvancingRef.current = true
     haptic('success')
     recordRoundScore?.({ [activePlayer.id]: 1 })
     recordResult(true)
     if (isMultiplayer && roomId) {
-      // НЕ обнуляем roomRoundState отдельно — App.nextRound сделает это
-      // атомарно при смене roundIndex (избегаем мерцания «ready» на 1 кадр).
-      // Сервер сам сбросит round при смене roundIndex (см. /action в worker.js).
+      // Server-side stats: счётчик «успел» у активного игрока. Гости видят
+      // через polling → одинаковая статистика у всех на финиш-экране.
+      try { await api.roomAction(roomId, {
+        statsDelta: { playerId: activePlayer.id, deltas: { five_success: 1 }, set: { name: activePlayer.name } }
+      }) } catch {}
     } else {
       setLocalPhase('ready'); setLocalStartedAt(0); setLocalResult(null)
     }
     onNext()
   }
   const handleFail = async () => {
+    if (fiveAdvancingRef.current) return
+    fiveAdvancingRef.current = true
     haptic('impact')
     recordResult(false)
     if (isMultiplayer && roomId) {
-      // см. handleSuccess — DO сам сбросит round при смене roundIndex.
+      try { await api.roomAction(roomId, {
+        statsDelta: { playerId: activePlayer.id, deltas: { five_fail: 1 }, set: { name: activePlayer.name } }
+      }) } catch {}
     } else {
       setLocalPhase('ready'); setLocalStartedAt(0); setLocalResult(null)
     }
@@ -4417,9 +4486,6 @@ function FiveSecondsRound({ game, round, roundIndex, total, players, recordRound
           <div className="five-done-banner">
             <Timer size={20}/> Время вышло!
           </div>
-          <p style={{textAlign:'center', color:'var(--muted)', fontSize:13, marginTop:8, marginBottom:4}}>
-            {activePlayer.name} успел назвать три?
-          </p>
           {isMyTurn ? (
             <div className="five-result-btns">
               <button className="five-btn-success" onClick={handleSuccess}>
@@ -6480,6 +6546,17 @@ function loadGameStats(key) {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
 
+// Извлечение значения из room.stats (если есть). room.stats: { [pid]: { key: n, name, ... } }.
+// Если room.stats не определён или у игрока нет ключа — fallback на localStorage.
+function pickStat(roomStats, localStats, pid, key) {
+  const rs = roomStats?.[pid]
+  if (rs && typeof rs[key] === 'number') return Number(rs[key]) || 0
+  const ls = localStats?.[pid]
+  if (ls && typeof ls === 'object' && typeof ls[key] === 'number') return Number(ls[key]) || 0
+  if (typeof ls === 'number') return Number(ls) || 0
+  return 0
+}
+
 // Простой плюрализатор: pluralRu(2, 'голос', 'голоса', 'голосов') → 'голоса'.
 function pluralRu(n, one, few, many) {
   const a = Math.abs(n) % 100, b = a % 10
@@ -6494,21 +6571,36 @@ function pluralRu(n, one, few, many) {
 //   detail: короткая динамическая подпись из РЕАЛЬНЫХ данных
 //          (для RatingList — заменяет статичную фразу-ачивку).
 // Сортировка: по убыванию value, затем tieBreak.
-function computeGameRanking(players, scores, game) {
+//
+// roomStats (optional): server-aggregated stats из DO (room.stats). Если
+// определён — используется ПРЕДПОЧТИТЕЛЬНО (единый source of truth для
+// всех клиентов в mp). Локальный pu_*_stats — fallback для single-player.
+function computeGameRanking(players, scores, game, roomStats = null) {
   const id = game?.id
   let rows = []
   let unit = (n) => `${n} ${pluralRu(n, 'очко', 'очка', 'очков')}`
 
+  // get(pid, lsKey, rsKey) — берёт значение из room.stats по rsKey ИЛИ
+  // из локального pu_*_stats объекта по lsKey ИЛИ из вложенного объекта.
+  const get = (lsObj, pid, lsKey, rsKey) => {
+    if (roomStats?.[pid] && typeof roomStats[pid][rsKey] === 'number') return Number(roomStats[pid][rsKey]) || 0
+    const ls = lsObj?.[pid]
+    if (lsKey == null) {
+      // primitive value (pu_whoofus_stats / pu_assoc_stats — просто число)
+      if (typeof ls === 'number') return Number(ls) || 0
+    } else if (ls && typeof ls === 'object') {
+      return Number(ls[lsKey]) || 0
+    }
+    return 0
+  }
+
   if (id === 'truth') {
-    // Параметр «смелость» = больше «Действий»; tieBreak = общая активность.
     const s = loadGameStats('pu_truth_stats')
     rows = players.map(p => {
-      const t = Number(s[p.id]?.truths || 0)
-      const d = Number(s[p.id]?.dares || 0)
+      const t = get(s, p.id, 'truths', 'truth_truths')
+      const d = get(s, p.id, 'dares',  'truth_dares')
       const total = t + d
-      const detail = total > 0
-        ? `${d} действ. · ${t} правд`
-        : 'не успел походить'
+      const detail = total > 0 ? `${d} действ. · ${t} правд` : 'не успел походить'
       return { ...p, value: d, tieBreak: total, detail, _truths: t, _dares: d, _total: total }
     })
     unit = (n) => `${n} ${pluralRu(n, 'действие', 'действия', 'действий')}`
@@ -6516,8 +6608,8 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'never') {
     const s = loadGameStats('pu_never_stats')
     rows = players.map(p => {
-      const yes = Number(s[p.id]?.yes || 0)
-      const no = Number(s[p.id]?.no || 0)
+      const yes = get(s, p.id, 'yes', 'never_yes')
+      const no  = get(s, p.id, 'no',  'never_no')
       const total = yes + no
       const detail = total > 0 ? `${yes} «было» · ${no} «не было»` : 'не голосовал'
       return { ...p, value: yes, tieBreak: -no, detail }
@@ -6527,7 +6619,7 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'whoofus') {
     const s = loadGameStats('pu_whoofus_stats')
     rows = players.map(p => {
-      const v = Number(s[p.id] || 0)
+      const v = get(s, p.id, null, 'whoofus_votes')
       return { ...p, value: v, detail: v > 0 ? `${v} ${pluralRu(v,'номинация','номинации','номинаций')}` : 'без номинаций' }
     })
     unit = (n) => `${n} ${pluralRu(n, 'голос', 'голоса', 'голосов')}`
@@ -6535,19 +6627,19 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'five') {
     const s = loadGameStats('pu_five_stats')
     rows = players.map(p => {
-      const suc = Number(s[p.id]?.success || 0)
-      const fail = Number(s[p.id]?.fail || 0)
+      const suc  = get(s, p.id, 'success', 'five_success')
+      const fail = get(s, p.id, 'fail',    'five_fail')
       const total = suc + fail
       const pct = total > 0 ? Math.round((suc / total) * 100) : 0
-      const detail = total > 0 ? `${suc}✓ из ${total} (${pct}%)` : 'не отвечал'
-      return { ...p, value: suc, tieBreak: -fail, detail }
+      const detail = total > 0 ? `успел ${suc}/${total}` : 'не отвечал'
+      return { ...p, value: suc, tieBreak: -fail, detail, _suc: suc, _fail: fail, _pct: pct }
     })
     unit = (n) => `${n} ${pluralRu(n, 'удача', 'удачи', 'удач')}`
 
   } else if (id === 'associations') {
     const s = loadGameStats('pu_assoc_stats')
     rows = players.map(p => {
-      const v = Number(s[p.id] || 0)
+      const v = get(s, p.id, null, 'assoc_matches')
       return { ...p, value: v, detail: v > 0 ? `${v} ${pluralRu(v,'совпадение','совпадения','совпадений')} с группой` : 'без совпадений' }
     })
     unit = (n) => `${n} ${pluralRu(n, 'совпадение', 'совпадения', 'совпадений')}`
@@ -6555,12 +6647,10 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'alias') {
     const s = loadGameStats('pu_alias_stats')
     rows = players.map(p => {
-      const cor = Number(s[p.id]?.totalCorrect || 0)
-      const sk = Number(s[p.id]?.totalSkipped || 0)
-      const best = Number(s[p.id]?.bestRound || 0)
-      const detail = cor + sk > 0
-        ? `${cor} объяснено · лучший раунд: ${best}`
-        : 'не объяснял'
+      const cor  = get(s, p.id, 'totalCorrect', 'alias_correct')
+      const sk   = get(s, p.id, 'totalSkipped', 'alias_skipped')
+      const best = get(s, p.id, 'bestRound',    'alias_best')
+      const detail = cor + sk > 0 ? `${cor} объяснено · лучший раунд: ${best}` : 'не объяснял'
       return { ...p, value: cor, tieBreak: -sk, detail }
     })
     unit = (n) => `${n} ${pluralRu(n, 'слово', 'слова', 'слов')}`
@@ -6568,12 +6658,10 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'crocodile') {
     const s = loadGameStats('pu_croco_stats')
     rows = players.map(p => {
-      const g = Number(s[p.id]?.guessed || 0)
-      const m = Number(s[p.id]?.missed || 0)
+      const g = get(s, p.id, 'guessed', 'croco_guessed')
+      const m = get(s, p.id, 'missed',  'croco_missed')
       const shown = g + m
-      const detail = shown > 0
-        ? `${g} из ${shown} ${pluralRu(shown,'слово','слова','слов')} угадано`
-        : 'не показывал'
+      const detail = shown > 0 ? `${g} из ${shown} ${pluralRu(shown,'слово','слова','слов')} угадано` : 'не показывал'
       return { ...p, value: g, tieBreak: -m, detail }
     })
     unit = (n) => `${n} ${pluralRu(n, 'слово', 'слова', 'слов')}`
@@ -6581,27 +6669,24 @@ function computeGameRanking(players, scores, game) {
   } else if (id === 'whoami') {
     const s = loadGameStats('pu_whoami_stats')
     rows = players.map(p => {
-      const w = Number(s[p.id]?.wins || 0)
-      const pts = Number(s[p.id]?.totalPts || scores?.[p.id] || 0)
-      const best = Number(s[p.id]?.bestPts || 0)
+      const w    = get(s, p.id, 'wins',     'whoami_wins')
+      const tms  = get(s, p.id, 'totalMs',  'whoami_time_ms')
       const detail = w > 0
-        ? `${w} ${pluralRu(w,'персонаж','персонажа','персонажей')} · +${pts} оч (лучшая: +${best})`
+        ? `${w} ${pluralRu(w,'персонаж','персонажа','персонажей')} · ${Math.round(tms/1000)} сек.`
         : 'не угадал'
-      return { ...p, value: w, tieBreak: pts, detail }
+      // Меньше времени → выше место. Используем negative для сортировки.
+      return { ...p, value: w, tieBreak: -tms, detail, _wins: w, _totalMs: tms }
     })
     unit = (n) => `${n} ${pluralRu(n, 'отгадка', 'отгадки', 'отгадок')}`
 
   } else if (id === 'would_rather') {
     const s = loadGameStats('pu_wr_stats')
     rows = players.map(p => {
-      const maj = Number(s[p.id]?.majority || 0)
-      const total = Number(s[p.id]?.total || 0)
-      const a = Number(s[p.id]?.picksA || 0)
-      const b = Number(s[p.id]?.picksB || 0)
-      const detail = total > 0
-        ? `${maj} из ${total} с большинством · А ${a} / Б ${b}`
-        : 'не выбирал'
-      return { ...p, value: maj, tieBreak: total, detail }
+      const maj = get(s, p.id, 'majority', 'wr_majority')
+      const min = get(s, p.id, 'minority', 'wr_minority')
+      const total = get(s, p.id, 'total', 'wr_total')
+      const detail = total > 0 ? `${maj} с большинством · ${min} с меньшинством` : 'не выбирал'
+      return { ...p, value: maj, tieBreak: total, detail, _maj: maj, _min: min, _total: total }
     })
     unit = (n) => `${n} ${pluralRu(n, 'попадание', 'попадания', 'попаданий')}`
 
@@ -6615,8 +6700,8 @@ function computeGameRanking(players, scores, game) {
   return { rows, unit }
 }
 
-function RatingList({ players, scores, game, winnerId }) {
-  const { rows, unit } = computeGameRanking(players, scores, game)
+function RatingList({ players, scores, game, winnerId, roomStats = null }) {
+  const { rows, unit } = computeGameRanking(players, scores, game, roomStats)
   // Кандидаты на места 2-5: всё после winnerId.
   const rest = rows.filter(r => String(r.id) !== String(winnerId)).slice(0, 4)
   if (!rest.length) return null
@@ -6666,7 +6751,7 @@ function RatingList({ players, scores, game, winnerId }) {
   )
 }
 
-function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated, myId }) {
+function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, isMultiplayer, isHost, roomId, onHostNavigated, myId, roomStats = null, onRoomStatsSync }) {
   // Гости в мультиплеере поллят комнату медленно (3 c, с visibility-gate):
   // как только хост поменяет state на 'lobby' или 'playing' — навигатор
   // сам отправит гостей туда же, чтобы все были в одном месте.
@@ -6684,6 +6769,10 @@ function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, 
         if (!res.ok) { schedule(); return }
         const et = res.headers.get('etag'); if (et) lastEtag = et
         const r = await res.json()
+        // Подтягиваем актуальную server-aggregated статистику для финиш-экрана.
+        // Важно для гостей: pu_*_stats у них в localStorage пустой, а room.stats
+        // имеет данные от всех клиентов (через POST statsDelta).
+        if (r.stats && onRoomStatsSync) onRoomStatsSync(r.stats)
         if (r.state === 'lobby' || r.state === 'playing') { onHostNavigated(r.state); return }
       } catch {}
       schedule()
@@ -6691,14 +6780,15 @@ function ResultsScreen({ game, players, scores, onAgain, onHome, onBackToLobby, 
     const schedule = () => { if (!cancelled) timer = setTimeout(poll, 3000) }
     poll()
     return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [isMultiplayer, isHost, roomId, onHostNavigated])
+  }, [isMultiplayer, isHost, roomId, onHostNavigated, onRoomStatsSync])
 
   const [shared, setShared] = useState(false)
 
   // Универсальный рейтинг на основе per-game stats — корректно работает для
   // всех 9 игр (а не только тех, где scores[] заполнен через recordRoundScore).
-  const rankedRows = useMemo(() => computeGameRanking(players, scores, game).rows, [players, scores, game])
-  const rankedUnit = useMemo(() => computeGameRanking(players, scores, game).unit, [players, scores, game])
+  // В mp используем roomStats (server-aggregated) — единая статистика у всех.
+  const rankedRows = useMemo(() => computeGameRanking(players, scores, game, roomStats).rows, [players, scores, game, roomStats])
+  const rankedUnit = useMemo(() => computeGameRanking(players, scores, game, roomStats).unit, [players, scores, game, roomStats])
   // legacy alias — для top3-карточек (которые ниже уже не рендерятся, но
   // оставим ranked доступным для возможного fallback).
   const ranked = rankedRows
@@ -6739,7 +6829,7 @@ const podiumMedals = ['🏆', '🥈', '🥉']
   // Универсальный winner через computeGameRanking. При нулевом value (никто не
   // достиг главного критерия — например, все в truth выбрали только «Правду»)
   // берём первого из ranked, чтобы хотя бы кто-то стал победителем.
-  const { rows: winnerRanked, unit: winnerUnit } = computeGameRanking(players, scores, game)
+  const { rows: winnerRanked, unit: winnerUnit } = computeGameRanking(players, scores, game, roomStats)
   const winnerRow = winnerRanked[0] && winnerRanked[0].value > 0
     ? winnerRanked[0]
     : (winnerRanked[0] || ranked[0])
@@ -6797,9 +6887,9 @@ const podiumMedals = ['🏆', '🥈', '🥉']
               <PlayerAvatar player={winner} auth={null} myId={null} size={96} className="winner-avatar"/>
             </div>
             <div className="winner-card-name">{winner.name}</div>
-            {/* Для truth подзаголовок убран — внизу два чипа с реальными числами
-                (Правды + Действия). Для остальных игр остаётся обычный sub. */}
-            {game.id !== 'truth' && <div className="winner-card-tagline">{winnerSub}</div>}
+            {/* Для игр с двойной метрикой (truth, five) подзаголовок убран —
+                чип внизу уже несёт полную информацию. Для остальных — sub. */}
+            {game.id !== 'truth' && game.id !== 'five' && <div className="winner-card-tagline">{winnerSub}</div>}
             {game.id === 'truth' ? (
               <div className="winner-card-score winner-card-score-dual">
                 <div className="winner-score-pill" data-side="truths">
@@ -6810,6 +6900,12 @@ const podiumMedals = ['🏆', '🥈', '🥉']
                   <span className="winner-card-score-n">{winnerRow?._dares || 0}</span>
                   <span className="winner-card-score-l">{pluralRu(winnerRow?._dares || 0, 'действие', 'действия', 'действий')}</span>
                 </div>
+              </div>
+            ) : game.id === 'five' ? (
+              // Для «5 секунд» — только один чип «успел N/M» в кнопке-стиле,
+              // под ником ничего не дублируется.
+              <div className="winner-card-score">
+                <span className="winner-card-score-n">успел {winnerRow?._suc || 0}/{(winnerRow?._suc || 0) + (winnerRow?._fail || 0)}</span>
               </div>
             ) : (winnerValue > 0 && (
               <div className="winner-card-score">
@@ -6873,7 +6969,7 @@ const podiumMedals = ['🏆', '🥈', '🥉']
       {/* Единый рейтинг 2-5 место для остальных игр. Для never рейтинг
           скрыт — выше уже специальный блок «🙋 Кто что делал». */}
       {game.id !== 'never' && (
-        <RatingList players={players} scores={scores} game={game} winnerId={winner?.id}/>
+        <RatingList players={players} scores={scores} game={game} winnerId={winner?.id} roomStats={roomStats}/>
       )}
 
       {/* Share block — компактнее, в стилистике карточки */}
